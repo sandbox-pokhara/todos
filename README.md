@@ -1,21 +1,107 @@
 # todos
 
-Discord bot for managing server todos, with a REST API
+Discord bot for managing a server's shared todo list, with a REST API (and a Claude Code skill that uses it).
 
-## Installation
+The bot and the API run in one process and share one SQLite database.
 
-You can install the package via pip:
+## Discord setup
+
+1. Create an application at <https://discord.com/developers/applications>. Under **Bot**, copy the token and enable **Server Members Intent**. The API needs that intent to look up member names.
+2. Invite the bot. Under **OAuth2 → URL Generator**, pick the scopes `bot` and `applications.commands` and the permission `Send Messages`, then open the generated URL.
+3. Get your server ID: turn on Developer Mode, right-click the server, then **Copy Server ID**.
+
+## Commands
+
+| Command | |
+|---|---|
+| `/todo add <title> [assignee]` | Add a todo |
+| `/todo list [status] [assignee]` | Show open, done or all todos |
+| `/todo done <todo>` / `/todo reopen <todo>` | Mark a todo done, or open it again |
+| `/todo assign <todo> [user]` | Assign a todo, or leave `user` empty to unassign |
+| `/todo edit <todo> <title>` | Rename |
+| `/todo delete <todo>` | Delete |
+
+The `<todo>` argument suggests matching todos as you type. Assignees are shown by name and are never pinged.
+
+## Configuration
+
+| Env var | |
+|---|---|
+| `DISCORD_TOKEN` | Bot token (required) |
+| `GUILD_ID` | Server ID; slash commands are registered there only (required) |
+| `API_KEY` | Bearer token for the API (required). Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| `DATABASE_PATH` | SQLite file (default `todos.db`; `/data/todos.db` in Docker) |
+| `PORT` | API port (default `8000`) |
+
+## Run locally
 
 ```
-pip install todo-bot
+cp .env.example .env   # fill it in
+uv run --env-file .env python -m todo_bot
 ```
 
-## Usage
+Interactive API docs are served at <http://localhost:8000/docs>.
 
-```python
-import todo_bot
+## Deploy to Dokku
 
-# usage examples here
+```
+# on the server
+dokku apps:create todos
+dokku storage:ensure-directory todos
+dokku storage:mount todos /var/lib/dokku/data/storage/todos:/data
+dokku config:set todos DISCORD_TOKEN=... GUILD_ID=... API_KEY=...
+dokku ports:set todos http:80:8000
+dokku checks:disable todos   # see below
+dokku domains:set todos todos.example.com
+dokku letsencrypt:enable todos   # if the letsencrypt plugin is installed; the API key must go over HTTPS
+
+# locally
+git remote add dokku dokku@your-server:todos
+git push dokku master
+```
+
+`checks:disable` turns off zero-downtime deploys. Without it, Dokku briefly runs the old and new containers side by side, so two bots would answer commands at the same time and both would write to the SQLite file. The cost is a few seconds of downtime per deploy.
+
+The storage mount keeps the database across deploys. Without it, every deploy wipes the todos.
+
+## API
+
+Every endpoint except `/health` needs `Authorization: Bearer $API_KEY`. Discord user IDs are strings.
+
+| Method | Path | |
+|---|---|---|
+| `GET` | `/todos?status=open\|done\|all&assignee_id=` | List todos |
+| `POST` | `/todos` | Create: `{"title", "assignee_id"?}` |
+| `GET` | `/todos/{id}` | Get one |
+| `PATCH` | `/todos/{id}` | Update any of `{"title", "done", "assignee_id"}`; send `assignee_id: null` to unassign |
+| `DELETE` | `/todos/{id}` | Delete |
+| `GET` | `/members` | Server members (`id`, `name`, `username`), for resolving names |
+| `GET` | `/health` | Liveness check, plus whether Discord is connected |
+
+## Claude Code skill
+
+`skill/todos/SKILL.md` teaches Claude Code to manage the list through the API. To install it for your user:
+
+```
+mkdir -p ~/.claude/skills && cp -r skill/todos ~/.claude/skills/
+```
+
+Then add the connection details to `~/.claude/settings.json`:
+
+```json
+{
+  "env": {
+    "TODO_API_URL": "https://todos.example.com",
+    "TODO_API_KEY": "..."
+  }
+}
+```
+
+## Development
+
+```
+uv run pytest
+uvx pre-commit run --all-files
 ```
 
 ## License

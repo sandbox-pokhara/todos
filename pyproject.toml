@@ -13,7 +13,12 @@ readme = "README.md"
 license = "MIT"
 keywords = []
 classifiers = ["Programming Language :: Python :: 3"]
-dependencies = []
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "discord-py>=2.7.1",
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.54.0",
+]
 dynamic = ["version"]
 
 [project.urls]
@@ -35,5 +40,11 @@ select = ["I"]
 [tool.pyright]
 venvPath = "."
 venv = ".venv"
-include = ["todo_bot", "test.py"]
+include = ["todo_bot", "tests"]
 typeCheckingMode = "strict"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+]
