@@ -152,24 +152,3 @@ async def test_board_sync(store: TodoStore) -> None:
     await board.move_to(2)
     assert channel.layout() == []
     assert client.channels[2].layout() == ["Completed", "TODO"]
-
-
-@pytest.mark.anyio
-async def test_replaces_legacy_board(store: TodoStore) -> None:
-    board, client = make_board(store)
-    channel = client.channels[CHANNEL_ID]
-    old = [(await channel.send("• old ✅")).id, (await channel.send("old board")).id]
-    db = store._db  # pyright: ignore[reportPrivateUsage]
-    await db.execute("CREATE TABLE done_messages (message_id INTEGER PRIMARY KEY)")
-    await db.execute("INSERT INTO done_messages VALUES (?)", (old[0],))
-    await db.execute(
-        "INSERT INTO board (id, channel_id, message_id) VALUES (1, ?, ?)",
-        (CHANNEL_ID, old[1]),
-    )
-    await db.execute("ALTER TABLE todos ADD COLUMN done_message_id INTEGER")
-    assert await store.get_board() is None  # the old row isn't a usable board
-
-    await board._migrate_legacy()  # pyright: ignore[reportPrivateUsage]
-    assert channel.layout() == ["Completed", "TODO"]
-    assert await store.get_board() is not None
-    assert await store.legacy_board_messages() is None

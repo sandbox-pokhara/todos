@@ -127,3 +127,55 @@ async def test_api_changes_reach_the_board(
     store.add_listener(lambda: changes.append(None))
     await client.post("/todos", json={"title": "From Claude"})
     assert changes
+
+
+@pytest.mark.anyio
+async def test_api_batch(store: TodoStore, client: httpx.AsyncClient) -> None:
+    changes: list[None] = []
+    store.add_listener(lambda: changes.append(None))
+    old = (await client.post("/todos", json={"title": "Old"})).json()
+    changes.clear()
+
+    r = await client.post(
+        "/todos/batch",
+        json=[
+            {"op": "delete", "id": old["id"]},
+            {"op": "create", "title": "Shipped", "done": True},
+            {"op": "create", "title": "Next", "assignee_id": str(ALICE.id)},
+            {"op": "update", "id": old["id"] + 2, "title": "Next up"},
+        ],
+    )
+    assert r.status_code == 200
+    deleted, shipped, created, renamed = r.json()
+    assert deleted is None
+    assert shipped["done"] and shipped["done_at"]
+    assert created["assignee_name"] == "Alice"
+    assert renamed["id"] == created["id"] and renamed["title"] == "Next up"
+    assert len(changes) == 1  # one board refresh for the whole batch
+
+    titles = [t["title"] for t in (await client.get("/todos?status=all")).json()]
+    assert titles == ["Next up", "Shipped"]
+
+
+@pytest.mark.anyio
+async def test_api_batch_is_all_or_nothing(client: httpx.AsyncClient) -> None:
+    r = await client.post(
+        "/todos/batch",
+        json=[{"op": "create", "title": "Kept?"}, {"op": "delete", "id": 999}],
+    )
+    assert r.status_code == 404
+    assert r.json()["detail"] == "Op 1: todo 999 not found; nothing was changed"
+
+    r = await client.post(
+        "/todos/batch",
+        json=[{"op": "create", "title": "Kept?"}, {"op": "create", "title": ""}],
+    )
+    assert r.status_code == 422
+    r = await client.post(
+        "/todos/batch",
+        json=[{"op": "create", "title": "x", "assignee_id": "999"}],
+    )
+    assert r.status_code == 422
+    assert (await client.post("/todos/batch", json=[])).status_code == 422
+
+    assert (await client.get("/todos?status=all")).json() == []

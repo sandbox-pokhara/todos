@@ -90,6 +90,7 @@ Every endpoint except `/health` needs `Authorization: Bearer $API_KEY`. Discord 
 | `GET` | `/todos/{id}` | Get one |
 | `PATCH` | `/todos/{id}` | Update any of `{"title", "done", "assignee_id"}`; send `assignee_id: null` to unassign |
 | `DELETE` | `/todos/{id}` | Delete |
+| `POST` | `/todos/batch` | Apply up to 200 changes in one request, all or nothing (see below) |
 | `GET` | `/members` | Server members (`id`, `name`, `username`), for resolving names |
 | `GET` | `/health` | Liveness check, plus whether Discord is connected |
 
@@ -122,3 +123,17 @@ uvx pre-commit run --all-files
 ## License
 
 This project is licensed under the terms of the MIT license.
+
+### Batch
+
+`POST /todos/batch` takes a list of operations and applies them in order, in one transaction:
+
+```json
+[
+  {"op": "create", "title": "Ship it", "assignee_id": "123", "done": true},
+  {"op": "update", "id": 7, "done": true},
+  {"op": "delete", "id": 3}
+]
+```
+
+A `create` accepts the same fields as `POST /todos`, plus an optional `done`. An `update` accepts the same fields as `PATCH /todos/{id}`, plus the `id`. The response has one entry per operation, in the same order: the todo after the change, or `null` for a delete. If any operation fails, nothing is applied. An unknown id returns `404` and names the operation's position. Invalid input returns `422`. The board refreshes once for the whole batch.

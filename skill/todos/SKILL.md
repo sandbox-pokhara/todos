@@ -28,15 +28,32 @@ curl -sS -H "Authorization: Bearer $TODO_API_KEY" -H "Content-Type: application/
 | Rename | `PATCH /todos/{id}` with `{"title": "..."}` |
 | Assign / unassign | `PATCH /todos/{id}` with `{"assignee_id": "<id>"}` / `{"assignee_id": null}` |
 | Delete | `DELETE /todos/{id}` (returns 204) |
+| Several changes at once | `POST /todos/batch` with a list of ops, see below |
 | Server members | `GET /members`, returns `[{"id", "name", "username"}]` |
 
 A todo looks like: `{"id", "title", "done", "assignee_id", "assignee_name", "created_by", "created_at", "done_at"}`.
+
+## Batch
+
+For more than one change, send a single `POST /todos/batch` instead of one request per todo. This applies whether the changes are adding a list, completing several todos, or clearing old ones. The body is a list of up to 200 ops, applied in order:
+
+```json
+[
+  {"op": "create", "title": "...", "assignee_id": "<id>", "done": false},
+  {"op": "update", "id": 7, "done": true},
+  {"op": "delete", "id": 3}
+]
+```
+
+`create` takes the same fields as `POST /todos`, plus an optional `done` (for something that's already finished). `update` takes the same fields as `PATCH /todos/{id}`. The response is one entry per op, in order: the todo, or `null` for a delete. It's all or nothing: on `404` (the message names the op's position) or `422`, nothing was changed, so fix the input and resend the whole batch.
+
+To delete everything, list the todos with `status=all` and send one delete op per id.
 
 ## Rules
 
 - Discord user IDs are **strings** in both requests and responses. Never send them as numbers, because they lose precision.
 - To assign by name ("give it to sam"), call `GET /members` first and match on `name` or `username`, ignoring case. If several people match, or none do, ask the user instead of guessing.
 - When the user names a todo by its text rather than its number, list the todos and match on the title. If more than one todo matches, ask which one.
-- Ask for confirmation before deleting. Completing, reopening and assigning need no confirmation.
+- Ask for confirmation before deleting, and once for a whole batch rather than per todo. Completing, reopening and assigning need no confirmation.
 - Show lists compactly, one line per todo: `#12 ⬜ Fix login — Sam` (use ✅ for done ones).
 - Errors: `401` means a bad key, `404` means the todo doesn't exist, `422` means invalid input or an assignee who isn't in the server (the message says which), and `503` from `/members` means the bot is still connecting, so try again shortly.

@@ -1,13 +1,24 @@
 import secrets
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from todo_bot.directory import Member, MemberDirectory
-from todo_bot.store import UNSET, Status, Todo, TodoStore, Unset
+from todo_bot.store import (
+    UNSET,
+    Create,
+    Delete,
+    Op,
+    Status,
+    Todo,
+    TodoNotFound,
+    TodoStore,
+    Unset,
+    Update,
+)
 
 # Discord IDs are exchanged as strings: they overflow JavaScript's safe integers.
 UserId = Annotated[str, Field(pattern=r"^\d{1,20}$")]
@@ -36,6 +47,25 @@ class TodoPatch(BaseModel):
     title: Title | None = None
     done: bool | None = None
     assignee_id: UserId | None = None
+
+
+class CreateOp(TodoCreate):
+    op: Literal["create"]
+    done: bool = False
+
+
+class UpdateOp(TodoPatch):
+    op: Literal["update"]
+    id: int
+
+
+class DeleteOp(BaseModel):
+    op: Literal["delete"]
+    id: int
+
+
+BatchOp = Annotated[CreateOp | UpdateOp | DeleteOp, Field(discriminator="op")]
+MAX_BATCH = 200
 
 
 class MemberOut(BaseModel):
@@ -78,6 +108,27 @@ def create_app(store: TodoStore, directory: MemberDirectory, api_key: str) -> Fa
             )
         return uid
 
+    def to_update(todo_id: int, body: TodoPatch) -> Update:
+        assignee: int | None | Unset = UNSET
+        if "assignee_id" in body.model_fields_set:
+            assignee = check_member(body.assignee_id) if body.assignee_id else None
+        return Update(
+            todo_id,
+            title=body.title if body.title is not None else UNSET,
+            done=body.done if body.done is not None else UNSET,
+            assignee_id=assignee,
+        )
+
+    def to_op(op: CreateOp | UpdateOp | DeleteOp) -> Op:
+        match op:
+            case CreateOp():
+                assignee = check_member(op.assignee_id) if op.assignee_id else None
+                return Create(op.title, assignee_id=assignee, done=op.done)
+            case UpdateOp():
+                return to_update(op.id, op)
+            case DeleteOp():
+                return Delete(op.id)
+
     async def get_or_404(todo_id: int) -> Todo:
         todo = await store.get(todo_id)
         if not todo:
@@ -109,18 +160,31 @@ def create_app(store: TodoStore, directory: MemberDirectory, api_key: str) -> Fa
 
     @app.patch("/todos/{todo_id}", dependencies=auth)
     async def update_todo(todo_id: int, body: TodoPatch) -> TodoOut:
-        await get_or_404(todo_id)
-        assignee: int | None | Unset = UNSET
-        if "assignee_id" in body.model_fields_set:
-            assignee = check_member(body.assignee_id) if body.assignee_id else None
-        updated = await store.update(
-            todo_id,
-            title=body.title if body.title is not None else UNSET,
-            done=body.done if body.done is not None else UNSET,
-            assignee_id=assignee,
-        )
+        try:
+            [updated] = await store.batch([to_update(todo_id, body)])
+        except TodoNotFound:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, f"Todo {todo_id} not found"
+            ) from None
         assert updated is not None
         return to_out(updated)
+
+    @app.post("/todos/batch", dependencies=auth)
+    async def batch(
+        ops: Annotated[list[BatchOp], Body(min_length=1, max_length=MAX_BATCH)],
+    ) -> list[TodoOut | None]:
+        """Apply several changes at once, in order, all or nothing.
+
+        Returns one result per op: the todo as it ends up, or null for a delete.
+        """
+        try:
+            results = await store.batch([to_op(op) for op in ops])
+        except TodoNotFound as e:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                f"Op {e.index}: todo {e.todo_id} not found; nothing was changed",
+            ) from None
+        return [to_out(t) if t else None for t in results]
 
     @app.delete(
         "/todos/{todo_id}", dependencies=auth, status_code=status.HTTP_204_NO_CONTENT

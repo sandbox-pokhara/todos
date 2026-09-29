@@ -1,4 +1,5 @@
-from collections.abc import Callable
+import asyncio
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum, auto
@@ -69,10 +70,44 @@ class BoardLocation:
     todo_message_id: int
 
 
+@dataclass(frozen=True)
+class Create:
+    title: str
+    assignee_id: int | None = None
+    done: bool = False
+    created_by: int | None = None
+
+
+@dataclass(frozen=True)
+class Update:
+    id: int
+    title: str | Unset = UNSET
+    done: bool | Unset = UNSET
+    assignee_id: int | None | Unset = UNSET
+
+
+@dataclass(frozen=True)
+class Delete:
+    id: int
+
+
+Op = Create | Update | Delete
+
+
+class TodoNotFound(Exception):
+    def __init__(self, todo_id: int, index: int) -> None:
+        super().__init__(f"Todo {todo_id} not found")
+        self.todo_id = todo_id
+        self.index = index  # position of the failing op in the batch
+
+
 class TodoStore:
     def __init__(self, db: aiosqlite.Connection) -> None:
         self._db = db
         self._listeners: list[Callable[[], None]] = []
+        # One shared connection means one transaction: writers take turns so a
+        # commit can never sweep up half of someone else's batch.
+        self._write_lock = asyncio.Lock()
 
     def add_listener(self, listener: Callable[[], None]) -> None:
         """Call `listener` after every change to the todos, from any source."""
@@ -100,17 +135,70 @@ class TodoStore:
     async def close(self) -> None:
         await self._db.close()
 
+    async def batch(self, ops: Sequence[Op]) -> list[Todo | None]:
+        """Apply `ops` in order, all or nothing.
+
+        Returns each op's todo as it ends up (None for deletes). Raises
+        TodoNotFound, having applied nothing, if an op names a missing todo.
+        """
+        async with self._write_lock:
+            try:
+                results = [await self._apply(op, i) for i, op in enumerate(ops)]
+            except BaseException:
+                await self._db.rollback()
+                raise
+            await self._db.commit()
+        if any(_writes(op) for op in ops):
+            self._changed()
+        return results
+
+    async def _apply(self, op: Op, index: int) -> Todo | None:
+        if isinstance(op, Create):
+            cursor = await self._db.execute(
+                "INSERT INTO todos (title, assignee_id, created_by, created_at, done,"
+                " done_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    op.title,
+                    op.assignee_id,
+                    op.created_by,
+                    _now(),
+                    int(op.done),
+                    _now() if op.done else None,
+                ),
+            )
+            return await self.get(cursor.lastrowid or 0)
+        if isinstance(op, Delete):
+            cursor = await self._db.execute("DELETE FROM todos WHERE id = ?", (op.id,))
+            if cursor.rowcount == 0:
+                raise TodoNotFound(op.id, index)
+            return None
+        sets: list[str] = []
+        params: list[object] = []
+        if not isinstance(op.title, Unset):
+            sets.append("title = ?")
+            params.append(op.title)
+        if not isinstance(op.done, Unset):
+            sets += ["done = ?", "done_at = ?"]
+            params += [int(op.done), _now() if op.done else None]
+        if not isinstance(op.assignee_id, Unset):
+            sets.append("assignee_id = ?")
+            params.append(op.assignee_id)
+        if sets:
+            await self._db.execute(
+                f"UPDATE todos SET {', '.join(sets)} WHERE id = ?", [*params, op.id]
+            )
+        todo = await self.get(op.id)
+        if not todo:
+            raise TodoNotFound(op.id, index)
+        return todo
+
     async def add(
-        self, title: str, assignee_id: int | None = None, created_by: int | None = None
+        self,
+        title: str,
+        assignee_id: int | None = None,
+        created_by: int | None = None,
     ) -> Todo:
-        cursor = await self._db.execute(
-            "INSERT INTO todos (title, assignee_id, created_by, created_at)"
-            " VALUES (?, ?, ?, ?)",
-            (title, assignee_id, created_by, _now()),
-        )
-        await self._db.commit()
-        self._changed()
-        todo = await self.get(cursor.lastrowid or 0)
+        [todo] = await self.batch([Create(title, assignee_id, created_by=created_by)])
         assert todo is not None
         return todo
 
@@ -165,32 +253,18 @@ class TodoStore:
         done: bool | Unset = UNSET,
         assignee_id: int | None | Unset = UNSET,
     ) -> Todo | None:
-        sets: list[str] = []
-        params: list[object] = []
-        if not isinstance(title, Unset):
-            sets.append("title = ?")
-            params.append(title)
-        if not isinstance(done, Unset):
-            sets += ["done = ?", "done_at = ?"]
-            params += [int(done), _now() if done else None]
-        if not isinstance(assignee_id, Unset):
-            sets.append("assignee_id = ?")
-            params.append(assignee_id)
-        if sets:
-            await self._db.execute(
-                f"UPDATE todos SET {', '.join(sets)} WHERE id = ?", [*params, todo_id]
-            )
-            await self._db.commit()
-            self._changed()
-        return await self.get(todo_id)
+        try:
+            [todo] = await self.batch([Update(todo_id, title, done, assignee_id)])
+        except TodoNotFound:
+            return None
+        return todo
 
     async def delete(self, todo_id: int) -> bool:
-        cursor = await self._db.execute("DELETE FROM todos WHERE id = ?", (todo_id,))
-        await self._db.commit()
-        if cursor.rowcount > 0:
-            self._changed()
-            return True
-        return False
+        try:
+            await self.batch([Delete(todo_id)])
+        except TodoNotFound:
+            return False
+        return True
 
     async def recent_done(self, limit: int = 200) -> list[Todo]:
         """The most recently completed todos, newest first."""
@@ -216,37 +290,25 @@ class TodoStore:
         )
 
     async def set_board(self, location: BoardLocation) -> None:
-        await self._db.execute(
-            "INSERT OR REPLACE INTO board (id, channel_id, message_id, done_message_id)"
-            " VALUES (1, ?, ?, ?)",
-            (location.channel_id, location.todo_message_id, location.done_message_id),
+        async with self._write_lock:
+            await self._db.execute(
+                "INSERT OR REPLACE INTO board"
+                " (id, channel_id, message_id, done_message_id) VALUES (1, ?, ?, ?)",
+                (
+                    location.channel_id,
+                    location.todo_message_id,
+                    location.done_message_id,
+                ),
+            )
+            await self._db.commit()
+
+
+def _writes(op: Op) -> bool:
+    """False only for an update that sets nothing."""
+    if isinstance(op, Update):
+        return not (
+            isinstance(op.title, Unset)
+            and isinstance(op.done, Unset)
+            and isinstance(op.assignee_id, Unset)
         )
-        await self._db.commit()
-
-    # Leftovers from the board layout that posted completed todos 10 per message.
-    # TODO: remove once the deployed database has been cleaned up.
-
-    async def legacy_board_messages(self) -> tuple[int, list[int]] | None:
-        """The old layout's channel and message ids, if its tables are still here."""
-        async with self._db.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'done_messages'"
-        ) as cursor:
-            if not await cursor.fetchone():
-                return None
-        async with self._db.execute(
-            "SELECT channel_id, message_id FROM board WHERE id = 1"
-        ) as cursor:
-            board = await cursor.fetchone()
-        if not board:
-            return None
-        async with self._db.execute("SELECT message_id FROM done_messages") as cursor:
-            ids = [row["message_id"] for row in await cursor.fetchall()]
-        return board["channel_id"], [*ids, board["message_id"]]
-
-    async def drop_legacy_board(self) -> None:
-        await self._db.execute("DROP TABLE IF EXISTS done_messages")
-        async with self._db.execute("PRAGMA table_info(todos)") as cursor:
-            columns = {row["name"] for row in await cursor.fetchall()}
-        if "done_message_id" in columns:
-            await self._db.execute("ALTER TABLE todos DROP COLUMN done_message_id")
-        await self._db.commit()
+    return True

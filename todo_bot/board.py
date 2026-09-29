@@ -87,10 +87,6 @@ class Board:
 
     async def run(self) -> None:
         await self.client.wait_until_ready()
-        try:
-            await self._migrate_legacy()
-        except Exception:
-            log.exception("Failed to replace the old board layout")
         self.request_refresh()  # catch up on anything that changed while offline
         while True:
             await self._dirty.wait()
@@ -146,16 +142,6 @@ class Board:
             render_done(await self.store.recent_done()),
             render_todo(await self.store.list_todos("open")),
         )
-
-    async def _migrate_legacy(self) -> None:
-        """Swap the old completed-todo messages for the two-message board."""
-        legacy = await self.store.legacy_board_messages()
-        if legacy:
-            channel_id, message_ids = legacy
-            async with self._lock:
-                await self._post(self._channel(channel_id))
-            await self._delete(channel_id, message_ids)
-        await self.store.drop_legacy_board()
 
     async def _delete(self, channel_id: int, message_ids: list[int]) -> None:
         channel = self._channel(channel_id)
