@@ -24,6 +24,10 @@ CREATE TABLE IF NOT EXISTS board (
     channel_id INTEGER NOT NULL,
     message_id INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS done_messages (
+    message_id INTEGER PRIMARY KEY,
+    content TEXT NOT NULL
+);
 """
 
 
@@ -67,6 +71,15 @@ class BoardLocation:
     message_id: int
 
 
+@dataclass(frozen=True)
+class DoneMessage:
+    """A message in the board channel listing completed todos."""
+
+    message_id: int
+    content: str  # as last posted, to skip edits that change nothing
+    todos: list[Todo]
+
+
 class TodoStore:
     def __init__(self, db: aiosqlite.Connection) -> None:
         self._db = db
@@ -88,6 +101,10 @@ class TodoStore:
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA journal_mode=WAL")
         await db.executescript(SCHEMA)
+        async with db.execute("PRAGMA table_info(todos)") as cursor:
+            columns = {row["name"] for row in await cursor.fetchall()}
+        if "done_message_id" not in columns:
+            await db.execute("ALTER TABLE todos ADD COLUMN done_message_id INTEGER")
         await db.commit()
         return cls(db)
 
@@ -199,3 +216,76 @@ class TodoStore:
             (location.channel_id, location.message_id),
         )
         await self._db.commit()
+
+    # Completed-todo messages. These writes are the board's own bookkeeping, so
+    # they don't notify listeners.
+
+    async def done_messages(self) -> list[DoneMessage]:
+        """Every completed-todo message, oldest first, with the todos it holds."""
+        async with self._db.execute(
+            "SELECT * FROM todos WHERE done_message_id IS NOT NULL ORDER BY done_at, id"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        by_message: dict[int, list[Todo]] = {}
+        for row in rows:
+            by_message.setdefault(row["done_message_id"], []).append(_row_to_todo(row))
+        async with self._db.execute(
+            "SELECT message_id, content FROM done_messages ORDER BY message_id"
+        ) as cursor:
+            messages = await cursor.fetchall()
+        return [
+            DoneMessage(
+                m["message_id"], m["content"], by_message.get(m["message_id"], [])
+            )
+            for m in messages
+        ]
+
+    async def unposted_done(self) -> list[Todo]:
+        """Completed todos that aren't in any message yet, oldest first."""
+        async with self._db.execute(
+            "SELECT * FROM todos WHERE done = 1 AND done_message_id IS NULL"
+            " ORDER BY done_at, id"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [_row_to_todo(row) for row in rows]
+
+    async def detach_reopened(self) -> None:
+        """Take reopened todos out of the completed-todo messages."""
+        await self._db.execute(
+            "UPDATE todos SET done_message_id = NULL"
+            " WHERE done = 0 AND done_message_id IS NOT NULL"
+        )
+        await self._db.commit()
+
+    async def save_done_message(
+        self, message_id: int, content: str, todo_ids: list[int]
+    ) -> None:
+        await self._db.execute(
+            "INSERT OR REPLACE INTO done_messages (message_id, content) VALUES (?, ?)",
+            (message_id, content),
+        )
+        await self._db.executemany(
+            "UPDATE todos SET done_message_id = ? WHERE id = ?",
+            [(message_id, todo_id) for todo_id in todo_ids],
+        )
+        await self._db.commit()
+
+    async def delete_done_message(self, message_id: int) -> None:
+        """Forget a message; its todos go back to being unposted."""
+        await self._db.execute(
+            "UPDATE todos SET done_message_id = NULL WHERE done_message_id = ?",
+            (message_id,),
+        )
+        await self._db.execute(
+            "DELETE FROM done_messages WHERE message_id = ?", (message_id,)
+        )
+        await self._db.commit()
+
+    async def reset_done_messages(self) -> list[int]:
+        """Forget every completed-todo message, returning their ids."""
+        async with self._db.execute("SELECT message_id FROM done_messages") as cursor:
+            ids = [row["message_id"] for row in await cursor.fetchall()]
+        await self._db.execute("UPDATE todos SET done_message_id = NULL")
+        await self._db.execute("DELETE FROM done_messages")
+        await self._db.commit()
+        return ids

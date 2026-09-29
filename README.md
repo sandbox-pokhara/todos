@@ -13,7 +13,12 @@ The bot and the API run in one process and share one SQLite database.
 
 ## The board
 
-`/todo board` posts one message listing every open todo. The bot edits that message whenever a todo changes, whether the change came from a slash command or the API, so the channel doesn't fill up. Running `/todo board` in another channel moves the board there and deletes the old message. Only members with **Manage Server** can run it. If someone deletes the board message, the bot posts a new one on the next change.
+The board channel is a log of finished work with the open todos at the bottom:
+
+- **Completed todos** are listed as `• title ✅`, up to 10 per message. A newly completed todo goes into the last completed message until it's full, then a new message starts. Reopening or deleting a completed todo takes it out of its message, and a message with nothing left in it is deleted.
+- **Open todos** are shown in one embed below the completed messages. The bot edits the embed in place. When a new completed message is posted, the bot deletes the embed and posts it again, so it stays at the bottom.
+
+The bot updates the channel whenever a todo changes, whether the change came from a slash command or the API. Run `/todo board` in another channel to move everything there; the old messages are deleted. Only members with **Manage Server** can run it. If someone deletes one of the bot's messages, the bot posts it again on the next change.
 
 Command replies are ephemeral: only the person who ran the command sees them. To keep the board channel tidy, you can deny **Send Messages** there for everyone except the bot. Slash commands still work in that channel, because they only need **Use Application Commands**.
 

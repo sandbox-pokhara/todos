@@ -40,20 +40,20 @@ class TodoCommands(app_commands.Group):
                 "Only members with Manage Server can move the board.", ephemeral=True
             )
             return
-        channel = interaction.channel
-        if not isinstance(channel, discord.abc.Messageable):
+        if interaction.channel_id is None:
             await interaction.response.send_message(
                 "The board can't be posted here.", ephemeral=True
             )
             return
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            await self._board.move_to(channel)
-        except discord.Forbidden:
-            await interaction.followup.send(
-                "I need **Send Messages** and **Embed Links** in this channel."
+        perms = interaction.app_permissions
+        if not (perms.send_messages and perms.embed_links):
+            await interaction.response.send_message(
+                "I need **Send Messages** and **Embed Links** in this channel.",
+                ephemeral=True,
             )
             return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await self._board.move_to(interaction.channel_id)
         await interaction.followup.send(
             "The board lives here now. It updates itself whenever a todo changes."
         )
