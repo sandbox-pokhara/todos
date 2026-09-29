@@ -15,7 +15,7 @@ The bot and the API run in one process and share one SQLite database.
 
 The board is two embeds in one channel, and the bot edits both in place:
 
-- **Completed**: the most recently completed todos, as `#12 Fix login ✅ - <time>`, with the newest at the bottom. The time is shown in each viewer's own timezone. An embed holds about 4,000 characters, so once it's full the oldest ones drop off. They're still in the database, and `/todo list status:done` shows them.
+- **Completed**: the most recently completed todos, as `#12 Fix login ✅ - Sep 29`, with the newest at the bottom. The date is in UTC. An embed holds about 4,000 characters, so once it's full the oldest ones drop off. They're still in the database, and `/todo list status:done` shows them.
 - **TODO**: every open todo, as `#12 Fix login`. If the list outgrows the embed, it ends with "…and N more".
 
 Assignees aren't shown on the board. `/todo list` and the command replies show them.

@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from itertools import count
 from types import SimpleNamespace
 from typing import Any, cast
@@ -105,8 +106,11 @@ async def test_render(store: TodoStore) -> None:
     for todo in (first, second):
         await store.update(todo.id, done=True)
     lines = (render_done(await store.recent_done()).description or "").splitlines()
-    assert lines[0].startswith(f"#{first.id} Ship it ✅ - <t:")  # oldest on top
-    assert lines[1].startswith(f"#{second.id} Write docs ✅ - <t:")
+    today = f"{datetime.now(timezone.utc):%b %d}"
+    assert lines == [  # oldest on top
+        f"#{first.id} Ship it ✅ - {today}",
+        f"#{second.id} Write docs ✅ - {today}",
+    ]
 
 
 @pytest.mark.anyio

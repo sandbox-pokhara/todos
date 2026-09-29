@@ -25,8 +25,7 @@ def format_todo(todo: Todo, *, assignee: bool = False) -> str:
 def format_done(todo: Todo) -> str:
     line = format_todo(todo)
     if todo.done_at:
-        # Discord shows this in each viewer's own timezone.
-        line += f" - <t:{int(todo.done_at.timestamp())}:f>"
+        line += f" - {todo.done_at:%b %d}"  # UTC date; close enough
     return line
 
 
