@@ -1,0 +1,11 @@
+# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
+_commit: v0.3.0
+_src_path: git@github.com:sandbox-pokhara/copier-python-package.git
+email: pradish@sandbox.com.np
+full_name: Pradish Bijukchhe
+github_repo: todos
+github_username: sandbox-pokhara
+package_name: todo_bot
+private: true
+project_name: todo-bot
+short_description: Discord bot for managing server todos, with a REST API

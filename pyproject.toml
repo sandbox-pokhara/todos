@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=70.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "todo-bot"
+requires-python = ">=3.11"
+authors = [
+  { name = "Pradish Bijukchhe", email = "pradish@sandbox.com.np" },
+]
+description = "Discord bot for managing server todos, with a REST API"
+readme = "README.md"
+license = "MIT"
+keywords = []
+classifiers = ["Programming Language :: Python :: 3"]
+dependencies = []
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/sandbox-pokhara/todos"
+Issues = "https://github.com/sandbox-pokhara/todos/issues"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-dir]
+"todo_bot" = "todo_bot"
+
+[tool.setuptools.dynamic]
+version = { attr = "todo_bot.version.__version__" }
+
+[tool.ruff.lint]
+select = ["I"]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+include = ["todo_bot", "test.py"]
+typeCheckingMode = "strict"

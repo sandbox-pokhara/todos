@@ -1,0 +1,18 @@
+version: "3"
+
+tasks:
+  bump:
+    cmds:
+      - uv run python -c "from datetime import datetime, timedelta, timezone; v = {{if .CLI_ARGS}}'{{.CLI_ARGS}}.' + {{end}}datetime.now(tz=timezone(timedelta(hours=5, minutes=45))).strftime(r'%y.%m.%d.%H%M'); open('todo_bot/version.py', 'w').write(f'__version__ = \"{v}\"\n')"
+
+  clean:
+    cmds:
+      - powershell -Command "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue build, dist, *.egg-info"
+
+  build:
+    cmds:
+      - uvx --from build --with setuptools pyproject-build --no-isolation --wheel
+
+  publish:
+    cmds:
+      - ssh-publish ubuntu@51.178.66.98 static/todo-bot
