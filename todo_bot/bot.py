@@ -72,7 +72,7 @@ class TodoCommands(app_commands.Group):
             created_by=interaction.user.id,
         )
         await interaction.response.send_message(
-            f"Added {format_todo(todo)}", ephemeral=True
+            f"Added {format_todo(todo, assignee=True)}", ephemeral=True
         )
 
     @app_commands.command(name="list", description="Show the todo list")
@@ -91,7 +91,7 @@ class TodoCommands(app_commands.Group):
         )
         embed = discord.Embed(
             title=title,
-            description=format_todos(todos) or "Nothing here 🎉",
+            description=format_todos(todos, assignee=True) or "Nothing here",
             color=discord.Color.blurple(),
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -102,7 +102,7 @@ class TodoCommands(app_commands.Group):
         if not updated:
             return await _not_found(interaction, todo)
         await interaction.response.send_message(
-            f"Done: {format_todo(updated)}", ephemeral=True
+            f"Done: {format_todo(updated, assignee=True)}", ephemeral=True
         )
 
     @done.autocomplete("todo")
@@ -117,7 +117,7 @@ class TodoCommands(app_commands.Group):
         if not updated:
             return await _not_found(interaction, todo)
         await interaction.response.send_message(
-            f"Reopened: {format_todo(updated)}", ephemeral=True
+            f"Reopened: {format_todo(updated, assignee=True)}", ephemeral=True
         )
 
     @reopen.autocomplete("todo")
@@ -138,7 +138,7 @@ class TodoCommands(app_commands.Group):
             return await _not_found(interaction, todo)
         verb = "Assigned" if user else "Unassigned"
         await interaction.response.send_message(
-            f"{verb}: {format_todo(updated)}", ephemeral=True
+            f"{verb}: {format_todo(updated, assignee=True)}", ephemeral=True
         )
 
     @assign.autocomplete("todo")
@@ -158,7 +158,7 @@ class TodoCommands(app_commands.Group):
         if not updated:
             return await _not_found(interaction, todo)
         await interaction.response.send_message(
-            f"Edited: {format_todo(updated)}", ephemeral=True
+            f"Edited: {format_todo(updated, assignee=True)}", ephemeral=True
         )
 
     @edit.autocomplete("todo")
@@ -173,7 +173,7 @@ class TodoCommands(app_commands.Group):
         if not existing or not await self.store.delete(todo):
             return await _not_found(interaction, todo)
         await interaction.response.send_message(
-            f"Deleted: {format_todo(existing)}", ephemeral=True
+            f"Deleted: {format_todo(existing, assignee=True)}", ephemeral=True
         )
 
     @delete.autocomplete("todo")

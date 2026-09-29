@@ -6,8 +6,8 @@ from typing import Any, cast
 import discord
 import pytest
 
-from todo_bot.board import Board, pack_done
-from todo_bot.store import TodoStore
+from todo_bot.board import Board, render_done, render_todo
+from todo_bot.store import BoardLocation, TodoStore
 
 CHANNEL_ID = 1
 
@@ -46,9 +46,9 @@ class FakeChannel:
         return SimpleNamespace(edit=edit, delete=delete)
 
     def layout(self) -> list[str]:
-        """Each message, top to bottom; the board shows as 'BOARD'."""
+        """Each message, top to bottom: its text, or an embed's title."""
         return [
-            m if isinstance(m, str) else "BOARD"
+            m if isinstance(m, str) else m.title
             for _, m in sorted(self.messages.items())
         ]
 
@@ -74,80 +74,98 @@ async def store() -> AsyncIterator[TodoStore]:
     await s.close()
 
 
-async def add_done(store: TodoStore, *titles: str) -> list[int]:
-    ids: list[int] = []
-    for title in titles:
-        todo = await store.add(title)
-        await store.update(todo.id, done=True)
-        ids.append(todo.id)
-    return ids
+def make_board(store: TodoStore) -> tuple[Board, FakeClient]:
+    client = FakeClient()
+    return Board(cast(discord.Client, client), store), client
 
 
-def lines(n: int, start: int = 0) -> str:
-    return "\n".join(f"• t{i} ✅" for i in range(start, start + n))
+async def refresh(board: Board) -> None:
+    await board._refresh()  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.anyio
-async def test_pack_done(store: TodoStore) -> None:
-    await add_done(store, *(f"t{i}" for i in range(25)))
-    todos = await store.unposted_done()
+async def test_board_location(store: TodoStore) -> None:
+    assert await store.get_board() is None
+    await store.set_board(BoardLocation(1, 2, 3))
+    await store.set_board(BoardLocation(4, 5, 6))
+    assert await store.get_board() == BoardLocation(4, 5, 6)
 
-    topped_up, new = pack_done(todos, None)
-    assert topped_up is None and [len(c) for c in new] == [10, 10, 5]
 
-    topped_up, new = pack_done(todos[:3], todos[3:10])
-    assert topped_up == todos[3:10] + todos[:3] and new == []
+@pytest.mark.anyio
+async def test_render(store: TodoStore) -> None:
+    assert render_todo([]).description == "Nothing to do"
+    assert render_done([]).description == "Nothing completed yet"
 
-    topped_up, new = pack_done(todos[:12], [])
-    assert topped_up == todos[:10] and new == [todos[10:12]]
+    first = await store.add("Ship it")
+    second = await store.add("Write docs")
+    assert render_todo(await store.list_todos("open")).description == (
+        f"#{first.id} Ship it\n#{second.id} Write docs"
+    )
+
+    for todo in (first, second):
+        await store.update(todo.id, done=True)
+    lines = (render_done(await store.recent_done()).description or "").splitlines()
+    assert lines[0].startswith(f"#{first.id} Ship it ✅ - <t:")  # oldest on top
+    assert lines[1].startswith(f"#{second.id} Write docs ✅ - <t:")
+
+
+@pytest.mark.anyio
+async def test_completed_keeps_the_newest_that_fit(store: TodoStore) -> None:
+    for i in range(40):
+        todo = await store.add(f"{i:02} " + "x" * 190)
+        await store.update(todo.id, done=True)
+    description = render_done(await store.recent_done()).description or ""
+    assert len(description) <= 4096
+    assert description.splitlines()[-1].startswith("#40 39 ")  # newest at the bottom
+    assert "#1 00 " not in description  # oldest dropped
 
 
 @pytest.mark.anyio
 async def test_board_sync(store: TodoStore) -> None:
-    client = FakeClient()
+    board, client = make_board(store)
     channel = client.channels[CHANNEL_ID]
-    board = Board(cast(discord.Client, client), store)
 
-    await add_done(store, *(f"t{i}" for i in range(12)))
-    await store.add("still open")
+    todo = await store.add("Ship it")
     await board.move_to(CHANNEL_ID)
-    assert channel.layout() == [lines(10), lines(2, 10), "BOARD"]
+    assert channel.layout() == ["Completed", "TODO"]
+    location = await store.get_board()
 
-    # Topping up the last message only edits; the board stays where it is.
-    before = await store.get_board()
-    await add_done(store, *(f"t{i}" for i in range(12, 20)))
-    await board._refresh()  # pyright: ignore[reportPrivateUsage]
-    assert channel.layout() == [lines(10), lines(10, 10), "BOARD"]
-    assert await store.get_board() == before
+    # Changes are edits: same two messages, new contents.
+    await store.update(todo.id, done=True)
+    await refresh(board)
+    assert await store.get_board() == location
+    [done, open_] = channel.messages.values()
+    assert "Ship it ✅" in (done.description or "")
+    assert open_.description == "Nothing to do"
 
-    # A new message goes below the board, so the board is reposted under it.
-    [t20] = await add_done(store, "t20")
-    await board._refresh()  # pyright: ignore[reportPrivateUsage]
-    assert channel.layout() == [lines(10), lines(10, 10), lines(1, 20), "BOARD"]
-    assert await store.get_board() != before
+    # If someone deletes one, both are reposted so Completed stays on top.
+    assert location
+    del channel.messages[location.done_message_id]
+    await refresh(board)
+    assert channel.layout() == ["Completed", "TODO"]
 
-    # Reopening removes it from its message; an emptied message is deleted.
-    await store.update(t20, done=False)
-    await board._refresh()  # pyright: ignore[reportPrivateUsage]
-    assert channel.layout() == [lines(10), lines(10, 10), "BOARD"]
-
-    # Moving reposts everything in the new channel and clears the old one.
+    # Moving clears the old channel.
     await board.move_to(2)
     assert channel.layout() == []
-    assert client.channels[2].layout() == [lines(10), lines(10, 10), "BOARD"]
+    assert client.channels[2].layout() == ["Completed", "TODO"]
 
 
 @pytest.mark.anyio
-async def test_board_recovers_deleted_message(store: TodoStore) -> None:
-    client = FakeClient()
+async def test_replaces_legacy_board(store: TodoStore) -> None:
+    board, client = make_board(store)
     channel = client.channels[CHANNEL_ID]
-    board = Board(cast(discord.Client, client), store)
+    old = [(await channel.send("• old ✅")).id, (await channel.send("old board")).id]
+    db = store._db  # pyright: ignore[reportPrivateUsage]
+    await db.execute("CREATE TABLE done_messages (message_id INTEGER PRIMARY KEY)")
+    await db.execute("INSERT INTO done_messages VALUES (?)", (old[0],))
+    await db.execute(
+        "INSERT INTO board (id, channel_id, message_id) VALUES (1, ?, ?)",
+        (CHANNEL_ID, old[1]),
+    )
+    await db.execute("ALTER TABLE todos ADD COLUMN done_message_id INTEGER")
+    assert await store.get_board() is None  # the old row isn't a usable board
 
-    await add_done(store, *(f"t{i}" for i in range(3)))
-    await board.move_to(CHANNEL_ID)
-    first = min(channel.messages)
-    del channel.messages[first]  # someone deletes the completed message
-
-    await add_done(store, "t3")
-    await board._refresh()  # pyright: ignore[reportPrivateUsage]
-    assert channel.layout() == [lines(4), "BOARD"]
+    await board._migrate_legacy()  # pyright: ignore[reportPrivateUsage]
+    assert channel.layout() == ["Completed", "TODO"]
+    assert await store.get_board() is not None
+    assert await store.legacy_board_messages() is None

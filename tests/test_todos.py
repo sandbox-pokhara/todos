@@ -4,9 +4,8 @@ import httpx
 import pytest
 
 from todo_bot.api import create_app
-from todo_bot.board import render_board
 from todo_bot.directory import Member
-from todo_bot.store import BoardLocation, TodoStore
+from todo_bot.store import TodoStore
 
 API_KEY = "test-key"
 ALICE = Member(id=111111111111111111, name="Alice", username="alice")
@@ -128,21 +127,3 @@ async def test_api_changes_reach_the_board(
     store.add_listener(lambda: changes.append(None))
     await client.post("/todos", json={"title": "From Claude"})
     assert changes
-
-
-@pytest.mark.anyio
-async def test_board_location(store: TodoStore) -> None:
-    assert await store.get_board() is None
-    await store.set_board(BoardLocation(channel_id=1, message_id=2))
-    await store.set_board(BoardLocation(channel_id=3, message_id=4))
-    assert await store.get_board() == BoardLocation(channel_id=3, message_id=4)
-
-
-@pytest.mark.anyio
-async def test_render_board(store: TodoStore) -> None:
-    assert render_board([]).description == "Nothing open 🎉"
-
-    todo = await store.add("Ship it", assignee_id=ALICE.id)
-    embed = render_board(await store.list_todos("open"))
-    assert embed.description == f"⬜ **#{todo.id}** Ship it — <@{ALICE.id}>"
-    assert embed.footer.text == "1 open · updated"

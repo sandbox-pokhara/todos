@@ -22,11 +22,8 @@ CREATE TABLE IF NOT EXISTS todos (
 CREATE TABLE IF NOT EXISTS board (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     channel_id INTEGER NOT NULL,
-    message_id INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS done_messages (
-    message_id INTEGER PRIMARY KEY,
-    content TEXT NOT NULL
+    message_id INTEGER NOT NULL,
+    done_message_id INTEGER
 );
 """
 
@@ -68,16 +65,8 @@ def _row_to_todo(row: aiosqlite.Row) -> Todo:
 @dataclass(frozen=True)
 class BoardLocation:
     channel_id: int
-    message_id: int
-
-
-@dataclass(frozen=True)
-class DoneMessage:
-    """A message in the board channel listing completed todos."""
-
-    message_id: int
-    content: str  # as last posted, to skip edits that change nothing
-    todos: list[Todo]
+    done_message_id: int
+    todo_message_id: int
 
 
 class TodoStore:
@@ -101,10 +90,10 @@ class TodoStore:
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA journal_mode=WAL")
         await db.executescript(SCHEMA)
-        async with db.execute("PRAGMA table_info(todos)") as cursor:
+        async with db.execute("PRAGMA table_info(board)") as cursor:
             columns = {row["name"] for row in await cursor.fetchall()}
         if "done_message_id" not in columns:
-            await db.execute("ALTER TABLE todos ADD COLUMN done_message_id INTEGER")
+            await db.execute("ALTER TABLE board ADD COLUMN done_message_id INTEGER")
         await db.commit()
         return cls(db)
 
@@ -203,89 +192,61 @@ class TodoStore:
             return True
         return False
 
-    async def get_board(self) -> BoardLocation | None:
+    async def recent_done(self, limit: int = 200) -> list[Todo]:
+        """The most recently completed todos, newest first."""
         async with self._db.execute(
-            "SELECT channel_id, message_id FROM board WHERE id = 1"
-        ) as cursor:
-            row = await cursor.fetchone()
-        return BoardLocation(row["channel_id"], row["message_id"]) if row else None
-
-    async def set_board(self, location: BoardLocation) -> None:
-        await self._db.execute(
-            "INSERT OR REPLACE INTO board (id, channel_id, message_id) VALUES (1, ?, ?)",
-            (location.channel_id, location.message_id),
-        )
-        await self._db.commit()
-
-    # Completed-todo messages. These writes are the board's own bookkeeping, so
-    # they don't notify listeners.
-
-    async def done_messages(self) -> list[DoneMessage]:
-        """Every completed-todo message, oldest first, with the todos it holds."""
-        async with self._db.execute(
-            "SELECT * FROM todos WHERE done_message_id IS NOT NULL ORDER BY done_at, id"
-        ) as cursor:
-            rows = await cursor.fetchall()
-        by_message: dict[int, list[Todo]] = {}
-        for row in rows:
-            by_message.setdefault(row["done_message_id"], []).append(_row_to_todo(row))
-        async with self._db.execute(
-            "SELECT message_id, content FROM done_messages ORDER BY message_id"
-        ) as cursor:
-            messages = await cursor.fetchall()
-        return [
-            DoneMessage(
-                m["message_id"], m["content"], by_message.get(m["message_id"], [])
-            )
-            for m in messages
-        ]
-
-    async def unposted_done(self) -> list[Todo]:
-        """Completed todos that aren't in any message yet, oldest first."""
-        async with self._db.execute(
-            "SELECT * FROM todos WHERE done = 1 AND done_message_id IS NULL"
-            " ORDER BY done_at, id"
+            "SELECT * FROM todos WHERE done = 1 ORDER BY done_at DESC, id DESC LIMIT ?",
+            (limit,),
         ) as cursor:
             rows = await cursor.fetchall()
         return [_row_to_todo(row) for row in rows]
 
-    async def detach_reopened(self) -> None:
-        """Take reopened todos out of the completed-todo messages."""
+    async def get_board(self) -> BoardLocation | None:
+        async with self._db.execute(
+            "SELECT channel_id, message_id, done_message_id FROM board"
+            " WHERE id = 1 AND done_message_id IS NOT NULL"
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            return None
+        return BoardLocation(
+            channel_id=row["channel_id"],
+            done_message_id=row["done_message_id"],
+            todo_message_id=row["message_id"],
+        )
+
+    async def set_board(self, location: BoardLocation) -> None:
         await self._db.execute(
-            "UPDATE todos SET done_message_id = NULL"
-            " WHERE done = 0 AND done_message_id IS NOT NULL"
+            "INSERT OR REPLACE INTO board (id, channel_id, message_id, done_message_id)"
+            " VALUES (1, ?, ?, ?)",
+            (location.channel_id, location.todo_message_id, location.done_message_id),
         )
         await self._db.commit()
 
-    async def save_done_message(
-        self, message_id: int, content: str, todo_ids: list[int]
-    ) -> None:
-        await self._db.execute(
-            "INSERT OR REPLACE INTO done_messages (message_id, content) VALUES (?, ?)",
-            (message_id, content),
-        )
-        await self._db.executemany(
-            "UPDATE todos SET done_message_id = ? WHERE id = ?",
-            [(message_id, todo_id) for todo_id in todo_ids],
-        )
-        await self._db.commit()
+    # Leftovers from the board layout that posted completed todos 10 per message.
+    # TODO: remove once the deployed database has been cleaned up.
 
-    async def delete_done_message(self, message_id: int) -> None:
-        """Forget a message; its todos go back to being unposted."""
-        await self._db.execute(
-            "UPDATE todos SET done_message_id = NULL WHERE done_message_id = ?",
-            (message_id,),
-        )
-        await self._db.execute(
-            "DELETE FROM done_messages WHERE message_id = ?", (message_id,)
-        )
-        await self._db.commit()
-
-    async def reset_done_messages(self) -> list[int]:
-        """Forget every completed-todo message, returning their ids."""
+    async def legacy_board_messages(self) -> tuple[int, list[int]] | None:
+        """The old layout's channel and message ids, if its tables are still here."""
+        async with self._db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'done_messages'"
+        ) as cursor:
+            if not await cursor.fetchone():
+                return None
+        async with self._db.execute(
+            "SELECT channel_id, message_id FROM board WHERE id = 1"
+        ) as cursor:
+            board = await cursor.fetchone()
+        if not board:
+            return None
         async with self._db.execute("SELECT message_id FROM done_messages") as cursor:
             ids = [row["message_id"] for row in await cursor.fetchall()]
-        await self._db.execute("UPDATE todos SET done_message_id = NULL")
-        await self._db.execute("DELETE FROM done_messages")
+        return board["channel_id"], [*ids, board["message_id"]]
+
+    async def drop_legacy_board(self) -> None:
+        await self._db.execute("DROP TABLE IF EXISTS done_messages")
+        async with self._db.execute("PRAGMA table_info(todos)") as cursor:
+            columns = {row["name"] for row in await cursor.fetchall()}
+        if "done_message_id" in columns:
+            await self._db.execute("ALTER TABLE todos DROP COLUMN done_message_id")
         await self._db.commit()
-        return ids

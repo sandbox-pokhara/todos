@@ -13,12 +13,14 @@ The bot and the API run in one process and share one SQLite database.
 
 ## The board
 
-The board channel is a log of finished work with the open todos at the bottom:
+The board is two embeds in one channel, and the bot edits both in place:
 
-- **Completed todos** are listed as `• title ✅`, up to 10 per message. A newly completed todo goes into the last completed message until it's full, then a new message starts. Reopening or deleting a completed todo takes it out of its message, and a message with nothing left in it is deleted.
-- **Open todos** are shown in one embed below the completed messages. The bot edits the embed in place. When a new completed message is posted, the bot deletes the embed and posts it again, so it stays at the bottom.
+- **Completed**: the most recently completed todos, as `#12 Fix login ✅ - <time>`, with the newest at the bottom. The time is shown in each viewer's own timezone. An embed holds about 4,000 characters, so once it's full the oldest ones drop off. They're still in the database, and `/todo list status:done` shows them.
+- **TODO**: every open todo, as `#12 Fix login`. If the list outgrows the embed, it ends with "…and N more".
 
-The bot updates the channel whenever a todo changes, whether the change came from a slash command or the API. Run `/todo board` in another channel to move everything there; the old messages are deleted. Only members with **Manage Server** can run it. If someone deletes one of the bot's messages, the bot posts it again on the next change.
+Assignees aren't shown on the board. `/todo list` and the command replies show them.
+
+The bot updates the board whenever a todo changes, whether the change came from a slash command or the API. Run `/todo board` in another channel to move the board there; the old messages are deleted. Only members with **Manage Server** can run it. If someone deletes one of the two messages, the bot posts both again on the next change, so Completed stays on top.
 
 Command replies are ephemeral: only the person who ran the command sees them. To keep the board channel tidy, you can deny **Send Messages** there for everyone except the bot. Slash commands still work in that channel, because they only need **Use Application Commands**.
 
