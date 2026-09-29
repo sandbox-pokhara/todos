@@ -1,25 +1,15 @@
+import asyncio
 import logging
 from typing import Literal
 
 import discord
 from discord import app_commands
 
+from todo_bot.board import Board, format_todo, format_todos
 from todo_bot.directory import Member
-from todo_bot.store import Status, Todo, TodoStore
+from todo_bot.store import Status, TodoStore
 
 log = logging.getLogger(__name__)
-
-EMBED_LIMIT = 4000
-
-
-def format_todo(todo: Todo) -> str:
-    box = "✅" if todo.done else "⬜"
-    title = f"~~{todo.title}~~" if todo.done else todo.title
-    line = f"{box} **#{todo.id}** {title}"
-    if todo.assignee_id:
-        # Mentions render as names; AllowedMentions.none() on the client stops pings.
-        line += f" — <@{todo.assignee_id}>"
-    return line
 
 
 async def _todo_choices(
@@ -38,9 +28,35 @@ async def _not_found(interaction: discord.Interaction, todo_id: int) -> None:
 
 
 class TodoCommands(app_commands.Group):
-    def __init__(self, store: TodoStore) -> None:
+    def __init__(self, store: TodoStore, board: Board) -> None:
         super().__init__(name="todo", description="Manage the server todo list")
         self.store = store
+        self._board = board
+
+    @app_commands.command(description="Post the todo board in this channel")
+    async def board(self, interaction: discord.Interaction) -> None:
+        if not interaction.permissions.manage_guild:
+            await interaction.response.send_message(
+                "Only members with Manage Server can move the board.", ephemeral=True
+            )
+            return
+        channel = interaction.channel
+        if not isinstance(channel, discord.abc.Messageable):
+            await interaction.response.send_message(
+                "The board can't be posted here.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await self._board.move_to(channel)
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "I need **Send Messages** and **Embed Links** in this channel."
+            )
+            return
+        await interaction.followup.send(
+            "The board lives here now. It updates itself whenever a todo changes."
+        )
 
     @app_commands.command(description="Add a todo")
     @app_commands.describe(title="What needs doing", assignee="Who should do it")
@@ -55,7 +71,9 @@ class TodoCommands(app_commands.Group):
             assignee_id=assignee.id if assignee else None,
             created_by=interaction.user.id,
         )
-        await interaction.response.send_message(f"Added {format_todo(todo)}")
+        await interaction.response.send_message(
+            f"Added {format_todo(todo)}", ephemeral=True
+        )
 
     @app_commands.command(name="list", description="Show the todo list")
     @app_commands.describe(status="Which todos to show", assignee="Only this person's")
@@ -68,31 +86,24 @@ class TodoCommands(app_commands.Group):
         todos = await self.store.list_todos(
             status, assignee_id=assignee.id if assignee else None
         )
-        lines: list[str] = []
-        length = 0
-        for i, todo in enumerate(todos):
-            line = format_todo(todo)
-            if length + len(line) > EMBED_LIMIT:
-                lines.append(f"…and {len(todos) - i} more")
-                break
-            lines.append(line)
-            length += len(line) + 1
         title = f"Todos ({status})" + (
             f" for {assignee.display_name}" if assignee else ""
         )
         embed = discord.Embed(
             title=title,
-            description="\n".join(lines) or "Nothing here 🎉",
+            description=format_todos(todos) or "Nothing here 🎉",
             color=discord.Color.blurple(),
         )
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(description="Mark a todo as done")
     async def done(self, interaction: discord.Interaction, todo: int) -> None:
         updated = await self.store.update(todo, done=True)
         if not updated:
             return await _not_found(interaction, todo)
-        await interaction.response.send_message(f"Done: {format_todo(updated)}")
+        await interaction.response.send_message(
+            f"Done: {format_todo(updated)}", ephemeral=True
+        )
 
     @done.autocomplete("todo")
     async def _done_autocomplete(
@@ -105,7 +116,9 @@ class TodoCommands(app_commands.Group):
         updated = await self.store.update(todo, done=False)
         if not updated:
             return await _not_found(interaction, todo)
-        await interaction.response.send_message(f"Reopened: {format_todo(updated)}")
+        await interaction.response.send_message(
+            f"Reopened: {format_todo(updated)}", ephemeral=True
+        )
 
     @reopen.autocomplete("todo")
     async def _reopen_autocomplete(
@@ -124,7 +137,9 @@ class TodoCommands(app_commands.Group):
         if not updated:
             return await _not_found(interaction, todo)
         verb = "Assigned" if user else "Unassigned"
-        await interaction.response.send_message(f"{verb}: {format_todo(updated)}")
+        await interaction.response.send_message(
+            f"{verb}: {format_todo(updated)}", ephemeral=True
+        )
 
     @assign.autocomplete("todo")
     async def _assign_autocomplete(
@@ -142,7 +157,9 @@ class TodoCommands(app_commands.Group):
         updated = await self.store.update(todo, title=title)
         if not updated:
             return await _not_found(interaction, todo)
-        await interaction.response.send_message(f"Edited: {format_todo(updated)}")
+        await interaction.response.send_message(
+            f"Edited: {format_todo(updated)}", ephemeral=True
+        )
 
     @edit.autocomplete("todo")
     async def _edit_autocomplete(
@@ -155,7 +172,9 @@ class TodoCommands(app_commands.Group):
         existing = await self.store.get(todo)
         if not existing or not await self.store.delete(todo):
             return await _not_found(interaction, todo)
-        await interaction.response.send_message(f"Deleted: {format_todo(existing)}")
+        await interaction.response.send_message(
+            f"Deleted: {format_todo(existing)}", ephemeral=True
+        )
 
     @delete.autocomplete("todo")
     async def _delete_autocomplete(
@@ -174,11 +193,21 @@ class TodoBot(discord.Client):
         self.store = store
         self.guild_id = guild_id
         self.tree = app_commands.CommandTree(self)
+        self.board = Board(self, store)
+        # Changes from the API go through the same store, so they update the board too.
+        store.add_listener(self.board.request_refresh)
+        self._board_task: asyncio.Task[None] | None = None
 
     async def setup_hook(self) -> None:
         guild = discord.Object(id=self.guild_id)
-        self.tree.add_command(TodoCommands(self.store), guild=guild)
+        self.tree.add_command(TodoCommands(self.store, self.board), guild=guild)
         await self.tree.sync(guild=guild)
+        self._board_task = asyncio.create_task(self.board.run())
+
+    async def close(self) -> None:
+        if self._board_task:
+            self._board_task.cancel()
+        await super().close()
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s", self.user)

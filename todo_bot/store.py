@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum, auto
@@ -17,7 +18,12 @@ CREATE TABLE IF NOT EXISTS todos (
     created_by INTEGER,
     created_at TEXT NOT NULL,
     done_at TEXT
-)
+);
+CREATE TABLE IF NOT EXISTS board (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    channel_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL
+);
 """
 
 
@@ -55,9 +61,24 @@ def _row_to_todo(row: aiosqlite.Row) -> Todo:
     )
 
 
+@dataclass(frozen=True)
+class BoardLocation:
+    channel_id: int
+    message_id: int
+
+
 class TodoStore:
     def __init__(self, db: aiosqlite.Connection) -> None:
         self._db = db
+        self._listeners: list[Callable[[], None]] = []
+
+    def add_listener(self, listener: Callable[[], None]) -> None:
+        """Call `listener` after every change to the todos, from any source."""
+        self._listeners.append(listener)
+
+    def _changed(self) -> None:
+        for listener in self._listeners:
+            listener()
 
     @classmethod
     async def open(cls, path: str) -> "TodoStore":
@@ -66,7 +87,7 @@ class TodoStore:
         db = await aiosqlite.connect(path)
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA journal_mode=WAL")
-        await db.execute(SCHEMA)
+        await db.executescript(SCHEMA)
         await db.commit()
         return cls(db)
 
@@ -82,6 +103,7 @@ class TodoStore:
             (title, assignee_id, created_by, _now()),
         )
         await self._db.commit()
+        self._changed()
         todo = await self.get(cursor.lastrowid or 0)
         assert todo is not None
         return todo
@@ -153,9 +175,27 @@ class TodoStore:
                 f"UPDATE todos SET {', '.join(sets)} WHERE id = ?", [*params, todo_id]
             )
             await self._db.commit()
+            self._changed()
         return await self.get(todo_id)
 
     async def delete(self, todo_id: int) -> bool:
         cursor = await self._db.execute("DELETE FROM todos WHERE id = ?", (todo_id,))
         await self._db.commit()
-        return cursor.rowcount > 0
+        if cursor.rowcount > 0:
+            self._changed()
+            return True
+        return False
+
+    async def get_board(self) -> BoardLocation | None:
+        async with self._db.execute(
+            "SELECT channel_id, message_id FROM board WHERE id = 1"
+        ) as cursor:
+            row = await cursor.fetchone()
+        return BoardLocation(row["channel_id"], row["message_id"]) if row else None
+
+    async def set_board(self, location: BoardLocation) -> None:
+        await self._db.execute(
+            "INSERT OR REPLACE INTO board (id, channel_id, message_id) VALUES (1, ?, ?)",
+            (location.channel_id, location.message_id),
+        )
+        await self._db.commit()

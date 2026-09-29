@@ -7,19 +7,27 @@ The bot and the API run in one process and share one SQLite database.
 ## Discord setup
 
 1. Create an application at <https://discord.com/developers/applications>. Under **Bot**, copy the token and enable **Server Members Intent**. The API needs that intent to look up member names.
-2. Invite the bot. Under **OAuth2 → URL Generator**, pick the scopes `bot` and `applications.commands` and the permission `Send Messages`, then open the generated URL.
+2. Invite the bot. Under **OAuth2 → URL Generator**, pick the scopes `bot` and `applications.commands` and the permissions `Send Messages` and `Embed Links`, then open the generated URL.
 3. Get your server ID: turn on Developer Mode, right-click the server, then **Copy Server ID**.
+4. In the channel you want as the board, run `/todo board`.
+
+## The board
+
+`/todo board` posts one message listing every open todo. The bot edits that message whenever a todo changes, whether the change came from a slash command or the API, so the channel doesn't fill up. Running `/todo board` in another channel moves the board there and deletes the old message. Only members with **Manage Server** can run it. If someone deletes the board message, the bot posts a new one on the next change.
+
+Command replies are ephemeral: only the person who ran the command sees them. To keep the board channel tidy, you can deny **Send Messages** there for everyone except the bot. Slash commands still work in that channel, because they only need **Use Application Commands**.
 
 ## Commands
 
 | Command | |
 |---|---|
 | `/todo add <title> [assignee]` | Add a todo |
-| `/todo list [status] [assignee]` | Show open, done or all todos |
+| `/todo list [status] [assignee]` | Show open, done or all todos, just to you |
 | `/todo done <todo>` / `/todo reopen <todo>` | Mark a todo done, or open it again |
 | `/todo assign <todo> [user]` | Assign a todo, or leave `user` empty to unassign |
 | `/todo edit <todo> <title>` | Rename |
 | `/todo delete <todo>` | Delete |
+| `/todo board` | Post the board in this channel, or move it here |
 
 The `<todo>` argument suggests matching todos as you type. Assignees are shown by name and are never pinged.
 
