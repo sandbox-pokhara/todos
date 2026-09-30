@@ -13,14 +13,14 @@ The bot and the API run in one process and share one SQLite database.
 
 ## The board
 
-The board is two embeds in one channel, and the bot edits both in place:
+The board is a set of embeds in one channel, which the bot edits in place:
 
-- **Completed**: the most recently completed todos, as `#12 Fix login ✅ - Sep 29`, with the newest at the bottom. The date is in UTC. An embed holds about 4,000 characters, so once it's full the oldest ones drop off. They're still in the database, and `/todo list status:done` shows them.
-- **TODO**: every open todo, as `#12 Fix login`. If the list outgrows the embed, it ends with "…and N more".
+- **Completed - Sep 29, 2026**: one message for each day that has completed todos, oldest at the top. Each lists that day's todos as `#12 Fix login ✅`, and the footer counts them (`3 todos done`). Days are in UTC. If a day outgrows its embed, the list ends with "…and N more", but the footer still counts every todo. When every todo from a day is reopened or deleted, that day's message is removed.
+- **TODO**: every open todo, as `#12 Fix login`, at the bottom. If the list outgrows the embed, it ends with "…and N more".
 
 Assignees aren't shown on the board. `/todo list` and the command replies show them.
 
-The bot updates the board whenever a todo changes, whether the change came from a slash command or the API. Run `/todo board` in another channel to move the board there; the old messages are deleted. Only members with **Manage Server** can run it. If someone deletes one of the two messages, the bot posts both again on the next change, so Completed stays on top.
+The bot updates the board whenever a todo changes, whether the change came from a slash command or the API. Discord can only add messages at the bottom of a channel, so the first todo completed on a new day posts that day's message and posts TODO again below it. Run `/todo board` in another channel to move the board there; the old messages are deleted. Only members with **Manage Server** can run it. If someone deletes a day's message, the bot posts that day and everything below it again, so the order stays the same.
 
 Command replies are ephemeral: only the person who ran the command sees them. To keep the board channel tidy, you can deny **Send Messages** there for everyone except the bot. Slash commands still work in that channel, because they only need **Use Application Commands**.
 

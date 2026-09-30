@@ -212,6 +212,11 @@ class TodoBot(discord.Client):
     async def on_ready(self) -> None:
         log.info("Logged in as %s", self.user)
 
+    async def on_raw_message_delete(
+        self, payload: discord.RawMessageDeleteEvent
+    ) -> None:
+        await self.board.message_deleted(payload.message_id)
+
     # MemberDirectory
 
     def _guild(self) -> discord.Guild | None:

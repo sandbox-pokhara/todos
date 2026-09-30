@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import Enum, auto
 from pathlib import Path
 from typing import Literal
@@ -24,7 +24,12 @@ CREATE TABLE IF NOT EXISTS board (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     channel_id INTEGER NOT NULL,
     message_id INTEGER NOT NULL,
-    done_message_id INTEGER
+    done_message_id INTEGER  -- the old single Completed message, until replaced
+);
+CREATE TABLE IF NOT EXISTS day_messages (
+    day TEXT PRIMARY KEY,
+    message_id INTEGER NOT NULL,
+    content TEXT NOT NULL
 );
 """
 
@@ -66,8 +71,16 @@ def _row_to_todo(row: aiosqlite.Row) -> Todo:
 @dataclass(frozen=True)
 class BoardLocation:
     channel_id: int
-    done_message_id: int
     todo_message_id: int
+
+
+@dataclass(frozen=True)
+class DayMessage:
+    """A message in the board channel listing one day's completed todos."""
+
+    day: date
+    message_id: int
+    content: str  # as last posted, to skip edits that change nothing
 
 
 @dataclass(frozen=True)
@@ -266,41 +279,95 @@ class TodoStore:
             return False
         return True
 
-    async def recent_done(self, limit: int = 200) -> list[Todo]:
-        """The most recently completed todos, newest first."""
+    async def done_by_day(self) -> dict[date, list[Todo]]:
+        """Completed todos grouped by UTC completion date, oldest first."""
         async with self._db.execute(
-            "SELECT * FROM todos WHERE done = 1 ORDER BY done_at DESC, id DESC LIMIT ?",
-            (limit,),
+            "SELECT * FROM todos WHERE done = 1 ORDER BY done_at, id"
         ) as cursor:
             rows = await cursor.fetchall()
-        return [_row_to_todo(row) for row in rows]
+        days: dict[date, list[Todo]] = {}
+        for row in rows:
+            todo = _row_to_todo(row)
+            assert todo.done_at is not None
+            days.setdefault(todo.done_at.date(), []).append(todo)
+        return days
 
     async def get_board(self) -> BoardLocation | None:
         async with self._db.execute(
-            "SELECT channel_id, message_id, done_message_id FROM board"
-            " WHERE id = 1 AND done_message_id IS NOT NULL"
+            "SELECT channel_id, message_id FROM board WHERE id = 1"
         ) as cursor:
             row = await cursor.fetchone()
         if not row:
             return None
         return BoardLocation(
-            channel_id=row["channel_id"],
-            done_message_id=row["done_message_id"],
-            todo_message_id=row["message_id"],
+            channel_id=row["channel_id"], todo_message_id=row["message_id"]
         )
 
     async def set_board(self, location: BoardLocation) -> None:
         async with self._write_lock:
             await self._db.execute(
                 "INSERT OR REPLACE INTO board"
-                " (id, channel_id, message_id, done_message_id) VALUES (1, ?, ?, ?)",
-                (
-                    location.channel_id,
-                    location.todo_message_id,
-                    location.done_message_id,
-                ),
+                " (id, channel_id, message_id, done_message_id) VALUES (1, ?, ?, NULL)",
+                (location.channel_id, location.todo_message_id),
             )
             await self._db.commit()
+
+    async def pop_legacy_done_message(self) -> int | None:
+        """The old single Completed message's id, if the board still has one."""
+        async with self._write_lock:
+            async with self._db.execute(
+                "SELECT done_message_id FROM board WHERE id = 1"
+            ) as cursor:
+                row = await cursor.fetchone()
+            await self._db.execute("UPDATE board SET done_message_id = NULL")
+            await self._db.commit()
+        return row["done_message_id"] if row else None
+
+    # Per-day Completed messages. These writes are the board's own bookkeeping,
+    # so they don't notify listeners.
+
+    async def day_messages(self) -> dict[date, DayMessage]:
+        async with self._db.execute("SELECT * FROM day_messages") as cursor:
+            rows = await cursor.fetchall()
+        messages = [
+            DayMessage(date.fromisoformat(r["day"]), r["message_id"], r["content"])
+            for r in rows
+        ]
+        return {m.day: m for m in messages}
+
+    async def save_day_message(self, message: DayMessage) -> None:
+        async with self._write_lock:
+            await self._db.execute(
+                "INSERT OR REPLACE INTO day_messages (day, message_id, content)"
+                " VALUES (?, ?, ?)",
+                (message.day.isoformat(), message.message_id, message.content),
+            )
+            await self._db.commit()
+
+    async def delete_day_message(self, day: date) -> None:
+        async with self._write_lock:
+            await self._db.execute(
+                "DELETE FROM day_messages WHERE day = ?", (day.isoformat(),)
+            )
+            await self._db.commit()
+
+    async def forget_day_message(self, message_id: int) -> bool:
+        """Forget a per-day message that was deleted; False if it isn't one."""
+        async with self._write_lock:
+            cursor = await self._db.execute(
+                "DELETE FROM day_messages WHERE message_id = ?", (message_id,)
+            )
+            await self._db.commit()
+        return cursor.rowcount > 0
+
+    async def clear_day_messages(self) -> list[int]:
+        """Forget every per-day message, returning their ids."""
+        async with self._write_lock:
+            async with self._db.execute("SELECT message_id FROM day_messages") as c:
+                ids = [row["message_id"] for row in await c.fetchall()]
+            await self._db.execute("DELETE FROM day_messages")
+            await self._db.commit()
+        return ids
 
 
 def _writes(op: Op) -> bool:
