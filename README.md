@@ -67,6 +67,7 @@ dokku storage:mount todos /var/lib/dokku/data/storage/todos:/data
 dokku config:set todos DISCORD_TOKEN=... GUILD_ID=... API_KEY=...
 dokku ports:set todos http:80:8000
 dokku checks:disable todos   # see below
+dokku checks:set todos wait-to-retire 0
 dokku domains:set todos todos.example.com
 dokku letsencrypt:enable todos   # if the letsencrypt plugin is installed; the API key must go over HTTPS
 
@@ -75,7 +76,7 @@ git remote add dokku dokku@your-server:todos
 git push dokku master
 ```
 
-`checks:disable` turns off zero-downtime deploys. Without it, Dokku briefly runs the old and new containers side by side, so two bots would answer commands at the same time and both would write to the SQLite file. The cost is a few seconds of downtime per deploy.
+`checks:disable` turns off zero-downtime deploys. Without it, Dokku briefly runs the old and new containers side by side, so two bots would answer commands at the same time and both would write to the SQLite file. Even with checks disabled, Dokku keeps the old container running for 60 seconds by default; `wait-to-retire 0` stops it right away. The cost is a few seconds of downtime per deploy.
 
 The storage mount keeps the database across deploys. Without it, every deploy wipes the todos.
 
