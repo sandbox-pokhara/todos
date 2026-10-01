@@ -38,11 +38,16 @@ def format_todos(todos: list[Todo], *, assignee: bool = False) -> str:
 
 
 def render_todo(todos: list[Todo]) -> discord.Embed:
-    return discord.Embed(
+    embed = discord.Embed(
         title="TODO",
         description=format_todos(todos) or "Nothing to do",
         color=discord.Color.blurple(),
     )
+    if todos:
+        embed.set_footer(
+            text=f"{len(todos)} {'todo' if len(todos) == 1 else 'todos'} open"
+        )
+    return embed
 
 
 def render_day(day: date, todos: list[Todo]) -> discord.Embed:

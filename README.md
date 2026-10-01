@@ -16,7 +16,7 @@ The bot and the API run in one process and share one SQLite database.
 The board is a set of embeds in one channel, which the bot edits in place:
 
 - **Completed - Sep 29, 2026**: one message for each day that has completed todos, oldest at the top. Each lists that day's todos as `#12 Fix login ✅`, and the footer counts them (`3 todos done`). Days are in UTC. If a day outgrows its embed, the list ends with "…and N more", but the footer still counts every todo. When every todo from a day is reopened or deleted, that day's message is removed.
-- **TODO**: every open todo, as `#12 Fix login`, at the bottom. If the list outgrows the embed, it ends with "…and N more".
+- **TODO**: every open todo, as `#12 Fix login`, at the bottom, with a footer that counts them (`5 todos open`). If the list outgrows the embed, it ends with "…and N more", but the footer still counts every todo.
 
 Assignees aren't shown on the board. `/todo list` and the command replies show them.
 

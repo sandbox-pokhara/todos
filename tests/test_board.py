@@ -111,12 +111,14 @@ async def test_board_location(store: TodoStore) -> None:
 @pytest.mark.anyio
 async def test_render(store: TodoStore) -> None:
     assert render_todo([]).description == "Nothing to do"
+    assert render_todo([]).footer.text is None
 
     first = await store.add("Ship it")
+    assert render_todo(await store.list_todos("open")).footer.text == "1 todo open"
     second = await store.add("Write docs")
-    assert render_todo(await store.list_todos("open")).description == (
-        f"#{first.id} Ship it\n#{second.id} Write docs"
-    )
+    embed = render_todo(await store.list_todos("open"))
+    assert embed.description == f"#{first.id} Ship it\n#{second.id} Write docs"
+    assert embed.footer.text == "2 todos open"
 
 
 @pytest.mark.anyio
