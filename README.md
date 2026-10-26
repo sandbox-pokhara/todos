@@ -6,7 +6,7 @@ The bot and the API run in one process and share one SQLite database.
 
 ## Discord setup
 
-1. Create an application at <https://discord.com/developers/applications>. Under **Bot**, copy the token and enable **Server Members Intent**. The API needs that intent to look up member names.
+1. Create an application at <https://discord.com/developers/applications>. Under **Bot**, copy the token.
 2. Invite the bot. Under **OAuth2 → URL Generator**, pick the scopes `bot` and `applications.commands` and the permissions `Send Messages` and `Embed Links`, then open the generated URL.
 3. Get your server ID: turn on Developer Mode, right-click the server, then **Copy Server ID**.
 4. In the channel you want as the board, run `/todo board`.
@@ -27,8 +27,6 @@ Each todo can have a project, such as `tibia-engine`, or none. The board shows i
 
 Anyone can run it. The choice is saved and survives restarts and `/todo board`.
 
-Assignees aren't shown on the board. `/todo list` and the command replies show them.
-
 The bot updates the board whenever a todo changes, whether the change came from a slash command or the API. Discord can only add messages at the bottom of a channel, so the first todo completed on a new day posts that day's message and posts TODO again below it. Run `/todo board` in another channel to move the board there; the old messages are deleted. Only members with **Manage Server** can run it. If someone deletes a day's message, the bot posts that day and everything below it again, so the order stays the same.
 
 Command replies are ephemeral: only the person who ran the command sees them. To keep the board channel tidy, you can deny **Send Messages** there for everyone except the bot. Slash commands still work in that channel, because they only need **Use Application Commands**.
@@ -37,17 +35,16 @@ Command replies are ephemeral: only the person who ran the command sees them. To
 
 | Command | |
 |---|---|
-| `/todo add <title> [assignee] [project]` | Add a todo |
-| `/todo list [status] [assignee] [project]` | Show open, done or all todos, just to you |
+| `/todo add <title> [project]` | Add a todo |
+| `/todo list [status] [project]` | Show open, done or all todos, just to you |
 | `/todo done <todo>` / `/todo reopen <todo>` | Mark a todo done, or open it again |
-| `/todo assign <todo> [user]` | Assign a todo, or leave `user` empty to unassign |
 | `/todo project <todo> [project]` | Set a todo's project, or leave `project` empty to clear it |
 | `/todo edit <todo> <title>` | Rename |
 | `/todo delete <todo>` | Delete |
 | `/todo board` | Post the board in this channel, or move it here |
 | `/todo view <layout>` | Show open todos on the board as a list, or by project |
 
-The `<todo>` argument suggests matching todos as you type, and `project` suggests the projects already in use. Assignees are shown by name and are never pinged.
+The `<todo>` argument suggests matching todos as you type, and `project` suggests the projects already in use.
 
 ## Configuration
 
@@ -93,17 +90,17 @@ The storage mount keeps the database across deploys. Without it, every deploy wi
 
 ## API
 
-Every endpoint except `/health` needs `Authorization: Bearer $API_KEY`. Discord user IDs are strings.
+Every endpoint except `/health` needs `Authorization: Bearer $API_KEY`. Discord user IDs (`created_by`) are strings.
 
 | Method | Path | |
 |---|---|---|
-| `GET` | `/todos?status=open\|done\|all&assignee_id=` | List todos |
-| `POST` | `/todos` | Create: `{"title", "assignee_id"?}` |
+| `GET` | `/todos?status=open\|done\|all&project=` | List todos |
+| `POST` | `/todos` | Create: `{"title", "project"?}` |
 | `GET` | `/todos/{id}` | Get one |
-| `PATCH` | `/todos/{id}` | Update any of `{"title", "done", "assignee_id"}`; send `assignee_id: null` to unassign |
+| `PATCH` | `/todos/{id}` | Update any of `{"title", "done", "project"}`; send `project: null` to clear it |
 | `DELETE` | `/todos/{id}` | Delete |
 | `POST` | `/todos/batch` | Apply up to 200 changes in one request, all or nothing (see below) |
-| `GET` | `/members` | Server members (`id`, `name`, `username`), for resolving names |
+| `GET` | `/projects` | Every project in use, by name |
 | `GET` | `/health` | Liveness check, plus whether Discord is connected |
 
 ## Claude Code skill
@@ -142,7 +139,7 @@ This project is licensed under the terms of the MIT license.
 
 ```json
 [
-  {"op": "create", "title": "Ship it", "assignee_id": "123", "done": true},
+  {"op": "create", "title": "Ship it", "project": "todos", "done": true},
   {"op": "update", "id": 7, "done": true},
   {"op": "delete", "id": 3}
 ]

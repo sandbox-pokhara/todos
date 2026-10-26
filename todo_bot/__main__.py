@@ -13,7 +13,7 @@ async def main() -> None:
     settings = Settings.from_env()
     store = await TodoStore.open(settings.database_path)
     bot = TodoBot(store, settings.guild_id)
-    app = create_app(store, bot, settings.api_key)
+    app = create_app(store, bot.ready, settings.api_key)
     server = uvicorn.Server(
         uvicorn.Config(app, host="0.0.0.0", port=settings.port, log_config=None)
     )

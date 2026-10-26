@@ -1,12 +1,12 @@
 import secrets
+from collections.abc import Callable
 from datetime import datetime
 from typing import Annotated, Literal
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Query, status
+from fastapi import Body, Depends, FastAPI, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
-from todo_bot.directory import Member, MemberDirectory
 from todo_bot.store import (
     UNSET,
     Create,
@@ -16,12 +16,9 @@ from todo_bot.store import (
     Todo,
     TodoNotFound,
     TodoStore,
-    Unset,
     Update,
 )
 
-# Discord IDs are exchanged as strings: they overflow JavaScript's safe integers.
-UserId = Annotated[str, Field(pattern=r"^\d{1,20}$")]
 Title = Annotated[str, Field(min_length=1, max_length=200)]
 # Lowercased on save; empty or null means no project.
 Project = Annotated[str, Field(max_length=50)]
@@ -32,8 +29,7 @@ class TodoOut(BaseModel):
     title: str
     project: str | None
     done: bool
-    assignee_id: str | None
-    assignee_name: str | None
+    # Discord IDs are sent as strings: they overflow JavaScript's safe integers.
     created_by: str | None
     created_at: datetime
     done_at: datetime | None
@@ -42,17 +38,14 @@ class TodoOut(BaseModel):
 class TodoCreate(BaseModel):
     title: Title
     project: Project | None = None
-    assignee_id: UserId | None = None
 
 
 class TodoPatch(BaseModel):
-    """Only fields that are sent are changed; send assignee_id: null to unassign
-    and project: null to clear the project."""
+    """Only fields that are sent are changed; send project: null to clear it."""
 
     title: Title | None = None
     project: Project | None = None
     done: bool | None = None
-    assignee_id: UserId | None = None
 
 
 class CreateOp(TodoCreate):
@@ -74,13 +67,9 @@ BatchOp = Annotated[CreateOp | UpdateOp | DeleteOp, Field(discriminator="op")]
 MAX_BATCH = 200
 
 
-class MemberOut(BaseModel):
-    id: str
-    name: str
-    username: str
-
-
-def create_app(store: TodoStore, directory: MemberDirectory, api_key: str) -> FastAPI:
+def create_app(
+    store: TodoStore, discord_ready: Callable[[], bool], api_key: str
+) -> FastAPI:
     bearer = HTTPBearer(auto_error=False)
 
     def require_key(
@@ -93,47 +82,28 @@ def create_app(store: TodoStore, directory: MemberDirectory, api_key: str) -> Fa
     auth = [Depends(require_key)]
 
     def to_out(todo: Todo) -> TodoOut:
-        assignee = directory.member(todo.assignee_id) if todo.assignee_id else None
         return TodoOut(
             id=todo.id,
             title=todo.title,
             project=todo.project,
             done=todo.done,
-            assignee_id=str(todo.assignee_id) if todo.assignee_id else None,
-            assignee_name=assignee.name if assignee else None,
             created_by=str(todo.created_by) if todo.created_by else None,
             created_at=todo.created_at,
             done_at=todo.done_at,
         )
 
-    def check_member(user_id: str) -> int:
-        uid = int(user_id)
-        if directory.ready() and directory.member(uid) is None:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                f"User {user_id} is not a member of the server",
-            )
-        return uid
-
     def to_update(todo_id: int, body: TodoPatch) -> Update:
-        assignee: int | None | Unset = UNSET
-        if "assignee_id" in body.model_fields_set:
-            assignee = check_member(body.assignee_id) if body.assignee_id else None
         return Update(
             todo_id,
             title=body.title if body.title is not None else UNSET,
             done=body.done if body.done is not None else UNSET,
-            assignee_id=assignee,
             project=body.project if "project" in body.model_fields_set else UNSET,
         )
 
     def to_op(op: CreateOp | UpdateOp | DeleteOp) -> Op:
         match op:
             case CreateOp():
-                assignee = check_member(op.assignee_id) if op.assignee_id else None
-                return Create(
-                    op.title, assignee_id=assignee, done=op.done, project=op.project
-                )
+                return Create(op.title, done=op.done, project=op.project)
             case UpdateOp():
                 return to_update(op.id, op)
             case DeleteOp():
@@ -147,27 +117,18 @@ def create_app(store: TodoStore, directory: MemberDirectory, api_key: str) -> Fa
 
     @app.get("/health")
     async def health() -> dict[str, bool]:
-        return {"ok": True, "discord_ready": directory.ready()}
+        return {"ok": True, "discord_ready": discord_ready()}
 
     @app.get("/todos", dependencies=auth)
     async def list_todos(
-        status: Status = "open",
-        assignee_id: Annotated[UserId | None, Query()] = None,
-        project: str | None = None,
+        status: Status = "open", project: str | None = None
     ) -> list[TodoOut]:
-        todos = await store.list_todos(
-            status,
-            assignee_id=int(assignee_id) if assignee_id else None,
-            project=project,
-        )
+        todos = await store.list_todos(status, project=project)
         return [to_out(t) for t in todos]
 
     @app.post("/todos", dependencies=auth, status_code=status.HTTP_201_CREATED)
     async def create_todo(body: TodoCreate) -> TodoOut:
-        assignee = check_member(body.assignee_id) if body.assignee_id else None
-        return to_out(
-            await store.add(body.title, assignee_id=assignee, project=body.project)
-        )
+        return to_out(await store.add(body.title, project=body.project))
 
     @app.get("/todos/{todo_id}", dependencies=auth)
     async def get_todo(todo_id: int) -> TodoOut:
@@ -212,18 +173,5 @@ def create_app(store: TodoStore, directory: MemberDirectory, api_key: str) -> Fa
     async def list_projects() -> list[str]:
         """Every project some todo has, by name."""
         return await store.projects()
-
-    @app.get("/members", dependencies=auth)
-    async def list_members() -> list[MemberOut]:
-        if not directory.ready():
-            raise HTTPException(
-                status.HTTP_503_SERVICE_UNAVAILABLE, "Discord not connected yet"
-            )
-        members: list[Member] = sorted(
-            directory.members(), key=lambda m: m.name.lower()
-        )
-        return [
-            MemberOut(id=str(m.id), name=m.name, username=m.username) for m in members
-        ]
 
     return app

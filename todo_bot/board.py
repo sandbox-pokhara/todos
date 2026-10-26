@@ -14,15 +14,12 @@ NO_PROJECT = "No project"
 REFRESH_DELAY = 1.0
 
 
-def format_todo(todo: Todo, *, assignee: bool = False, project: bool = True) -> str:
+def format_todo(todo: Todo, *, project: bool = True) -> str:
     """`#12 tibia-engine: Fix login`, or without the project when `project` is off."""
     title = f"{todo.project}: {todo.title}" if project and todo.project else todo.title
     line = f"#{todo.id} {title}"
     if todo.done:
         line += " ✅"
-    if assignee and todo.assignee_id:
-        # Mentions render as names; AllowedMentions.none() on the client stops pings.
-        line += f" — <@{todo.assignee_id}>"
     return line
 
 
@@ -39,8 +36,8 @@ def _fit(entries: list[str]) -> str:
     return "\n".join(lines)
 
 
-def format_todos(todos: list[Todo], *, assignee: bool = False) -> str:
-    return _fit([format_todo(todo, assignee=assignee) for todo in todos])
+def format_todos(todos: list[Todo]) -> str:
+    return _fit([format_todo(todo) for todo in todos])
 
 
 def _open_footer(todos: list[Todo]) -> str:

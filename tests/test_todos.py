@@ -6,22 +6,9 @@ import httpx
 import pytest
 
 from todo_bot.api import create_app
-from todo_bot.directory import Member
 from todo_bot.store import TodoStore
 
 API_KEY = "test-key"
-ALICE = Member(id=111111111111111111, name="Alice", username="alice")
-
-
-class FakeDirectory:
-    def ready(self) -> bool:
-        return True
-
-    def members(self) -> list[Member]:
-        return [ALICE]
-
-    def member(self, user_id: int) -> Member | None:
-        return ALICE if user_id == ALICE.id else None
 
 
 @pytest.fixture
@@ -38,7 +25,7 @@ async def store() -> AsyncIterator[TodoStore]:
 
 @pytest.fixture
 async def client(store: TodoStore) -> AsyncIterator[httpx.AsyncClient]:
-    app = create_app(store, FakeDirectory(), API_KEY)
+    app = create_app(store, lambda: True, API_KEY)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
         base_url="http://test",
@@ -49,8 +36,8 @@ async def client(store: TodoStore) -> AsyncIterator[httpx.AsyncClient]:
 
 @pytest.mark.anyio
 async def test_store_lifecycle(store: TodoStore) -> None:
-    todo = await store.add("Write docs", assignee_id=ALICE.id, created_by=1)
-    assert not todo.done and todo.assignee_id == ALICE.id
+    todo = await store.add("Write docs", created_by=1)
+    assert not todo.done and todo.created_by == 1
 
     done = await store.update(todo.id, done=True)
     assert done and done.done and done.done_at
@@ -58,8 +45,8 @@ async def test_store_lifecycle(store: TodoStore) -> None:
     assert await store.list_todos("open") == []
     assert [t.id for t in await store.list_todos("done")] == [todo.id]
 
-    unassigned = await store.update(todo.id, assignee_id=None, done=False)
-    assert unassigned and unassigned.assignee_id is None and unassigned.done_at is None
+    reopened = await store.update(todo.id, done=False)
+    assert reopened and not reopened.done and reopened.done_at is None
 
     assert [t.id for t in await store.search("docs")] == [todo.id]
     assert [t.id for t in await store.search(f"#{todo.id}")] == [todo.id]
@@ -77,20 +64,14 @@ async def test_api_requires_key(client: httpx.AsyncClient) -> None:
 
 @pytest.mark.anyio
 async def test_api_crud(client: httpx.AsyncClient) -> None:
-    r = await client.post(
-        "/todos", json={"title": "Ship it", "assignee_id": str(ALICE.id)}
-    )
+    r = await client.post("/todos", json={"title": "Ship it"})
     assert r.status_code == 201
     todo = r.json()
-    assert todo["assignee_name"] == "Alice"
-    assert todo["assignee_id"] == str(ALICE.id)
+    assert "assignee_id" not in todo
 
     r = await client.patch(f"/todos/{todo['id']}", json={"done": True})
     assert r.json()["done"] is True
-    assert r.json()["assignee_id"] == str(ALICE.id)  # untouched
-
-    r = await client.patch(f"/todos/{todo['id']}", json={"assignee_id": None})
-    assert r.json()["assignee_id"] is None
+    assert r.json()["title"] == "Ship it"  # untouched
 
     assert (await client.get("/todos")).json() == []
     assert len((await client.get("/todos", params={"status": "all"})).json()) == 1
@@ -102,10 +83,9 @@ async def test_api_crud(client: httpx.AsyncClient) -> None:
 @pytest.mark.anyio
 async def test_api_validation(client: httpx.AsyncClient) -> None:
     assert (await client.post("/todos", json={"title": ""})).status_code == 422
-    r = await client.post("/todos", json={"title": "x", "assignee_id": "999"})
+    r = await client.post("/todos", json={"title": "x" * 201})
     assert r.status_code == 422
-    members = (await client.get("/members")).json()
-    assert members == [{"id": str(ALICE.id), "name": "Alice", "username": "alice"}]
+    assert (await client.get("/members")).status_code == 404
 
 
 @pytest.mark.anyio
@@ -143,7 +123,7 @@ async def test_api_batch(store: TodoStore, client: httpx.AsyncClient) -> None:
         json=[
             {"op": "delete", "id": old["id"]},
             {"op": "create", "title": "Shipped", "done": True},
-            {"op": "create", "title": "Next", "assignee_id": str(ALICE.id)},
+            {"op": "create", "title": "Next", "project": "api"},
             {"op": "update", "id": old["id"] + 2, "title": "Next up"},
         ],
     )
@@ -151,7 +131,7 @@ async def test_api_batch(store: TodoStore, client: httpx.AsyncClient) -> None:
     deleted, shipped, created, renamed = r.json()
     assert deleted is None
     assert shipped["done"] and shipped["done_at"]
-    assert created["assignee_name"] == "Alice"
+    assert created["project"] == "api"
     assert renamed["id"] == created["id"] and renamed["title"] == "Next up"
     assert len(changes) == 1  # one board refresh for the whole batch
 
@@ -175,7 +155,7 @@ async def test_api_batch_is_all_or_nothing(client: httpx.AsyncClient) -> None:
     assert r.status_code == 422
     r = await client.post(
         "/todos/batch",
-        json=[{"op": "create", "title": "x", "assignee_id": "999"}],
+        json=[{"op": "update", "id": 1, "title": ""}],
     )
     assert r.status_code == 422
     assert (await client.post("/todos/batch", json=[])).status_code == 422
@@ -234,5 +214,8 @@ async def test_migrates_title_prefixes(tmp_path: Path) -> None:
             (None, "Meet at 10:30"),
             (None, "No project"),
         ]
+        # The old, now unused assignee_id column doesn't get in the way.
+        added = await store.add("New", project="todos")
+        assert (await store.get(added.id)) == added
     finally:
         await store.close()

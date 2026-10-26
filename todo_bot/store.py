@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS todos (
     title TEXT NOT NULL,
     project TEXT,
     done INTEGER NOT NULL DEFAULT 0,
-    assignee_id INTEGER,
+    -- Databases from before assignees were removed keep an unused assignee_id.
     created_by INTEGER,
     created_at TEXT NOT NULL,
     done_at TEXT
@@ -59,7 +59,6 @@ class Todo:
     title: str
     project: str | None
     done: bool
-    assignee_id: int | None
     created_by: int | None
     created_at: datetime
     done_at: datetime | None
@@ -75,7 +74,6 @@ def _row_to_todo(row: aiosqlite.Row) -> Todo:
         title=row["title"],
         project=row["project"],
         done=bool(row["done"]),
-        assignee_id=row["assignee_id"],
         created_by=row["created_by"],
         created_at=datetime.fromisoformat(row["created_at"]),
         done_at=datetime.fromisoformat(row["done_at"]) if row["done_at"] else None,
@@ -100,7 +98,6 @@ class DayMessage:
 @dataclass(frozen=True)
 class Create:
     title: str
-    assignee_id: int | None = None
     done: bool = False
     created_by: int | None = None
     project: str | None = None
@@ -111,7 +108,6 @@ class Update:
     id: int
     title: str | Unset = UNSET
     done: bool | Unset = UNSET
-    assignee_id: int | None | Unset = UNSET
     project: str | None | Unset = UNSET
 
 
@@ -200,12 +196,11 @@ class TodoStore:
     async def _apply(self, op: Op, index: int) -> Todo | None:
         if isinstance(op, Create):
             cursor = await self._db.execute(
-                "INSERT INTO todos (title, project, assignee_id, created_by,"
-                " created_at, done, done_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO todos (title, project, created_by, created_at, done,"
+                " done_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     op.title,
                     normalize_project(op.project),
-                    op.assignee_id,
                     op.created_by,
                     _now(),
                     int(op.done),
@@ -226,9 +221,6 @@ class TodoStore:
         if not isinstance(op.done, Unset):
             sets += ["done = ?", "done_at = ?"]
             params += [int(op.done), _now() if op.done else None]
-        if not isinstance(op.assignee_id, Unset):
-            sets.append("assignee_id = ?")
-            params.append(op.assignee_id)
         if not isinstance(op.project, Unset):
             sets.append("project = ?")
             params.append(normalize_project(op.project))
@@ -244,12 +236,11 @@ class TodoStore:
     async def add(
         self,
         title: str,
-        assignee_id: int | None = None,
         created_by: int | None = None,
         project: str | None = None,
     ) -> Todo:
         [todo] = await self.batch(
-            [Create(title, assignee_id, created_by=created_by, project=project)]
+            [Create(title, created_by=created_by, project=project)]
         )
         assert todo is not None
         return todo
@@ -264,7 +255,6 @@ class TodoStore:
     async def list_todos(
         self,
         status: Status = "open",
-        assignee_id: int | None = None,
         project: str | None = None,
     ) -> list[Todo]:
         clauses: list[str] = []
@@ -272,9 +262,6 @@ class TodoStore:
         if status != "all":
             clauses.append("done = ?")
             params.append(1 if status == "done" else 0)
-        if assignee_id is not None:
-            clauses.append("assignee_id = ?")
-            params.append(assignee_id)
         if project := normalize_project(project):
             clauses.append("project = ?")
             params.append(project)
@@ -309,13 +296,10 @@ class TodoStore:
         *,
         title: str | Unset = UNSET,
         done: bool | Unset = UNSET,
-        assignee_id: int | None | Unset = UNSET,
         project: str | None | Unset = UNSET,
     ) -> Todo | None:
         try:
-            [todo] = await self.batch(
-                [Update(todo_id, title, done, assignee_id, project)]
-            )
+            [todo] = await self.batch([Update(todo_id, title, done, project)])
         except TodoNotFound:
             return None
         return todo
@@ -446,7 +430,6 @@ def _writes(op: Op) -> bool:
         return not (
             isinstance(op.title, Unset)
             and isinstance(op.done, Unset)
-            and isinstance(op.assignee_id, Unset)
             and isinstance(op.project, Unset)
         )
     return True

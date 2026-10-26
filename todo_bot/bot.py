@@ -6,7 +6,6 @@ import discord
 from discord import app_commands
 
 from todo_bot.board import Board, format_todo, format_todos
-from todo_bot.directory import Member
 from todo_bot.store import BoardLayout, Status, TodoStore
 
 log = logging.getLogger(__name__)
@@ -93,26 +92,18 @@ class TodoCommands(app_commands.Group):
         )
 
     @app_commands.command(description="Add a todo")
-    @app_commands.describe(
-        title="What needs doing",
-        assignee="Who should do it",
-        project="Which project it's for",
-    )
+    @app_commands.describe(title="What needs doing", project="Which project it's for")
     async def add(
         self,
         interaction: discord.Interaction,
         title: app_commands.Range[str, 1, 200],
-        assignee: discord.Member | None = None,
         project: app_commands.Range[str, 1, 50] | None = None,
     ) -> None:
         todo = await self.store.add(
-            title,
-            assignee_id=assignee.id if assignee else None,
-            created_by=interaction.user.id,
-            project=project,
+            title, created_by=interaction.user.id, project=project
         )
         await interaction.response.send_message(
-            f"Added {format_todo(todo, assignee=True)}", ephemeral=True
+            f"Added {format_todo(todo)}", ephemeral=True
         )
 
     @add.autocomplete("project")
@@ -122,29 +113,20 @@ class TodoCommands(app_commands.Group):
         return await _project_choices(self.store, current)
 
     @app_commands.command(name="list", description="Show the todo list")
-    @app_commands.describe(
-        status="Which todos to show",
-        assignee="Only this person's",
-        project="Only this project's",
-    )
+    @app_commands.describe(status="Which todos to show", project="Only this project's")
     async def list_(
         self,
         interaction: discord.Interaction,
         status: Literal["open", "done", "all"] = "open",
-        assignee: discord.Member | None = None,
         project: str | None = None,
     ) -> None:
-        todos = await self.store.list_todos(
-            status, assignee_id=assignee.id if assignee else None, project=project
-        )
-        title = (
-            f"Todos ({status})"
-            + (f" for {assignee.display_name}" if assignee else "")
-            + (f" in {project.strip().lower()}" if project else "")
+        todos = await self.store.list_todos(status, project=project)
+        title = f"Todos ({status})" + (
+            f" in {project.strip().lower()}" if project else ""
         )
         embed = discord.Embed(
             title=title,
-            description=format_todos(todos, assignee=True) or "Nothing here",
+            description=format_todos(todos) or "Nothing here",
             color=discord.Color.blurple(),
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -166,7 +148,7 @@ class TodoCommands(app_commands.Group):
         if not updated:
             return await _not_found(interaction, todo)
         await interaction.response.send_message(
-            f"Done: {format_todo(updated, assignee=True)}", ephemeral=True
+            f"Done: {format_todo(updated)}", ephemeral=True
         )
 
     @done.autocomplete("todo")
@@ -181,7 +163,7 @@ class TodoCommands(app_commands.Group):
         if not updated:
             return await _not_found(interaction, todo)
         await interaction.response.send_message(
-            f"Reopened: {format_todo(updated, assignee=True)}", ephemeral=True
+            f"Reopened: {format_todo(updated)}", ephemeral=True
         )
 
     @reopen.autocomplete("todo")
@@ -189,27 +171,6 @@ class TodoCommands(app_commands.Group):
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[int]]:
         return await _todo_choices(self.store, current, "done")
-
-    @app_commands.command(description="Assign a todo (leave user empty to unassign)")
-    async def assign(
-        self,
-        interaction: discord.Interaction,
-        todo: int,
-        user: discord.Member | None = None,
-    ) -> None:
-        updated = await self.store.update(todo, assignee_id=user.id if user else None)
-        if not updated:
-            return await _not_found(interaction, todo)
-        verb = "Assigned" if user else "Unassigned"
-        await interaction.response.send_message(
-            f"{verb}: {format_todo(updated, assignee=True)}", ephemeral=True
-        )
-
-    @assign.autocomplete("todo")
-    async def _assign_autocomplete(
-        self, interaction: discord.Interaction, current: str
-    ) -> list[app_commands.Choice[int]]:
-        return await _todo_choices(self.store, current, "all")
 
     @app_commands.command(
         description="Set a todo's project (leave project empty to clear it)"
@@ -225,7 +186,7 @@ class TodoCommands(app_commands.Group):
             return await _not_found(interaction, todo)
         verb = "Moved" if updated.project else "Cleared project"
         await interaction.response.send_message(
-            f"{verb}: {format_todo(updated, assignee=True)}", ephemeral=True
+            f"{verb}: {format_todo(updated)}", ephemeral=True
         )
 
     @project.autocomplete("todo")
@@ -251,7 +212,7 @@ class TodoCommands(app_commands.Group):
         if not updated:
             return await _not_found(interaction, todo)
         await interaction.response.send_message(
-            f"Edited: {format_todo(updated, assignee=True)}", ephemeral=True
+            f"Edited: {format_todo(updated)}", ephemeral=True
         )
 
     @edit.autocomplete("todo")
@@ -266,7 +227,7 @@ class TodoCommands(app_commands.Group):
         if not existing or not await self.store.delete(todo):
             return await _not_found(interaction, todo)
         await interaction.response.send_message(
-            f"Deleted: {format_todo(existing, assignee=True)}", ephemeral=True
+            f"Deleted: {format_todo(existing)}", ephemeral=True
         )
 
     @delete.autocomplete("todo")
@@ -278,10 +239,10 @@ class TodoCommands(app_commands.Group):
 
 class TodoBot(discord.Client):
     def __init__(self, store: TodoStore, guild_id: int) -> None:
-        intents = discord.Intents.default()
-        intents.members = True  # needed to list members for the API
+        # Titles can contain mentions; never let the board ping anyone.
         super().__init__(
-            intents=intents, allowed_mentions=discord.AllowedMentions.none()
+            intents=discord.Intents.default(),
+            allowed_mentions=discord.AllowedMentions.none(),
         )
         self.store = store
         self.guild_id = guild_id
@@ -310,25 +271,5 @@ class TodoBot(discord.Client):
     ) -> None:
         await self.board.message_deleted(payload.message_id)
 
-    # MemberDirectory
-
-    def _guild(self) -> discord.Guild | None:
-        return self.get_guild(self.guild_id)
-
     def ready(self) -> bool:
-        return self.is_ready() and self._guild() is not None
-
-    def members(self) -> list[Member]:
-        guild = self._guild()
-        if not guild:
-            return []
-        return [_to_member(m) for m in guild.members if not m.bot]
-
-    def member(self, user_id: int) -> Member | None:
-        guild = self._guild()
-        found = guild.get_member(user_id) if guild else None
-        return _to_member(found) if found else None
-
-
-def _to_member(member: discord.Member) -> Member:
-    return Member(id=member.id, name=member.display_name, username=member.name)
+        return self.is_ready() and self.get_guild(self.guild_id) is not None
