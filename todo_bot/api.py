@@ -23,11 +23,14 @@ from todo_bot.store import (
 # Discord IDs are exchanged as strings: they overflow JavaScript's safe integers.
 UserId = Annotated[str, Field(pattern=r"^\d{1,20}$")]
 Title = Annotated[str, Field(min_length=1, max_length=200)]
+# Lowercased on save; empty or null means no project.
+Project = Annotated[str, Field(max_length=50)]
 
 
 class TodoOut(BaseModel):
     id: int
     title: str
+    project: str | None
     done: bool
     assignee_id: str | None
     assignee_name: str | None
@@ -38,13 +41,16 @@ class TodoOut(BaseModel):
 
 class TodoCreate(BaseModel):
     title: Title
+    project: Project | None = None
     assignee_id: UserId | None = None
 
 
 class TodoPatch(BaseModel):
-    """Only fields that are sent are changed; send assignee_id: null to unassign."""
+    """Only fields that are sent are changed; send assignee_id: null to unassign
+    and project: null to clear the project."""
 
     title: Title | None = None
+    project: Project | None = None
     done: bool | None = None
     assignee_id: UserId | None = None
 
@@ -91,6 +97,7 @@ def create_app(store: TodoStore, directory: MemberDirectory, api_key: str) -> Fa
         return TodoOut(
             id=todo.id,
             title=todo.title,
+            project=todo.project,
             done=todo.done,
             assignee_id=str(todo.assignee_id) if todo.assignee_id else None,
             assignee_name=assignee.name if assignee else None,
@@ -117,13 +124,16 @@ def create_app(store: TodoStore, directory: MemberDirectory, api_key: str) -> Fa
             title=body.title if body.title is not None else UNSET,
             done=body.done if body.done is not None else UNSET,
             assignee_id=assignee,
+            project=body.project if "project" in body.model_fields_set else UNSET,
         )
 
     def to_op(op: CreateOp | UpdateOp | DeleteOp) -> Op:
         match op:
             case CreateOp():
                 assignee = check_member(op.assignee_id) if op.assignee_id else None
-                return Create(op.title, assignee_id=assignee, done=op.done)
+                return Create(
+                    op.title, assignee_id=assignee, done=op.done, project=op.project
+                )
             case UpdateOp():
                 return to_update(op.id, op)
             case DeleteOp():
@@ -143,16 +153,21 @@ def create_app(store: TodoStore, directory: MemberDirectory, api_key: str) -> Fa
     async def list_todos(
         status: Status = "open",
         assignee_id: Annotated[UserId | None, Query()] = None,
+        project: str | None = None,
     ) -> list[TodoOut]:
         todos = await store.list_todos(
-            status, assignee_id=int(assignee_id) if assignee_id else None
+            status,
+            assignee_id=int(assignee_id) if assignee_id else None,
+            project=project,
         )
         return [to_out(t) for t in todos]
 
     @app.post("/todos", dependencies=auth, status_code=status.HTTP_201_CREATED)
     async def create_todo(body: TodoCreate) -> TodoOut:
         assignee = check_member(body.assignee_id) if body.assignee_id else None
-        return to_out(await store.add(body.title, assignee_id=assignee))
+        return to_out(
+            await store.add(body.title, assignee_id=assignee, project=body.project)
+        )
 
     @app.get("/todos/{todo_id}", dependencies=auth)
     async def get_todo(todo_id: int) -> TodoOut:
@@ -192,6 +207,11 @@ def create_app(store: TodoStore, directory: MemberDirectory, api_key: str) -> Fa
     async def delete_todo(todo_id: int) -> None:
         await get_or_404(todo_id)
         await store.delete(todo_id)
+
+    @app.get("/projects", dependencies=auth)
+    async def list_projects() -> list[str]:
+        """Every project some todo has, by name."""
+        return await store.projects()
 
     @app.get("/members", dependencies=auth)
     async def list_members() -> list[MemberOut]:

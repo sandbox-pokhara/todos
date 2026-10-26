@@ -7,7 +7,7 @@ from typing import Any, cast
 import discord
 import pytest
 
-from todo_bot.board import Board, render_day, render_todo
+from todo_bot.board import Board, render_day, render_todo, render_todo_by_project
 from todo_bot.store import BoardLocation, TodoStore
 
 CHANNEL_ID = 1
@@ -24,21 +24,30 @@ class FakeChannel:
         self.id = channel_id
         self._ids = ids
         self.messages: dict[int, Any] = {}
+        self.views: dict[int, discord.ui.View | None] = {}
 
     async def send(
-        self, content: str | None = None, *, embed: discord.Embed | None = None
+        self,
+        content: str | None = None,
+        *,
+        embed: discord.Embed | None = None,
+        view: discord.ui.View | None = None,
     ) -> SimpleNamespace:
         message_id = next(self._ids)
         self.messages[message_id] = content if embed is None else embed
+        self.views[message_id] = view
         return SimpleNamespace(id=message_id)
 
     def get_partial_message(self, message_id: int) -> SimpleNamespace:
         async def edit(
-            content: str | None = None, embed: discord.Embed | None = None
+            content: str | None = None,
+            embed: discord.Embed | None = None,
+            view: discord.ui.View | None = None,
         ) -> None:
             if message_id not in self.messages:
                 raise not_found()
             self.messages[message_id] = content if embed is None else embed
+            self.views[message_id] = view
 
         async def delete() -> None:
             if self.messages.pop(message_id, None) is None:
@@ -225,3 +234,63 @@ async def test_replaces_legacy_completed_message(store: TodoStore) -> None:
     await complete_on(store, "Old one", SEP_28)
     await refresh(board)
     assert channel.layout() == ["Completed - Sep 28, 2026", "TODO"]
+
+
+@pytest.mark.anyio
+async def test_render_by_project(store: TodoStore) -> None:
+    assert render_todo_by_project([]).description == "Nothing to do"
+
+    a = await store.add("Fix login", project="smurfskins")
+    b = await store.add("Water the plants")
+    c = await store.add("Add batch", project="master-api")
+    d = await store.add("Write docs", project="smurfskins")
+    todos = await store.list_todos("open")
+    # The list layout keeps the project in front of the title.
+    assert render_todo(todos).description == (
+        f"#{a.id} smurfskins: Fix login\n#{b.id} Water the plants\n"
+        f"#{c.id} master-api: Add batch\n#{d.id} smurfskins: Write docs"
+    )
+    embed = render_todo_by_project(todos)
+    assert embed.title == "TODO"
+    assert embed.description == (
+        f"**master-api**\n#{c.id} Add batch\n\n"
+        f"**smurfskins**\n#{a.id} Fix login\n#{d.id} Write docs\n\n"
+        f"**No project**\n#{b.id} Water the plants"
+    )
+    assert embed.footer.text == "4 todos open"
+
+
+@pytest.mark.anyio
+async def test_long_project_list_is_cut_off(store: TodoStore) -> None:
+    for i in range(40):
+        await store.add(f"{i:02} " + "x" * 190, project=f"p{i % 3}")
+    embed = render_todo_by_project(await store.list_todos("open"))
+    assert len(embed.description or "") <= 4096
+    assert (embed.description or "").endswith("more")
+    assert embed.footer.text == "40 todos open"
+
+
+@pytest.mark.anyio
+async def test_layout_switch(store: TodoStore) -> None:
+    board, client = make_board(store)
+    channel = client.channels[CHANNEL_ID]
+    await store.add("Fix login", project="smurfskins")
+    await board.move_to(CHANNEL_ID)
+    location = await store.get_board()
+    assert location
+    assert await store.board_layout() == "list"
+    picker = channel.views[location.todo_message_id]
+    assert picker
+    assert [cast(discord.ui.Button[Any], b).custom_id for b in picker.children] == [
+        "board-layout:list",
+        "board-layout:project",
+    ]
+
+    await store.set_board_layout("project")
+    await refresh(board)
+    todo = channel.messages[location.todo_message_id]
+    assert (todo.description or "").startswith("**smurfskins**")
+
+    # Moving the board keeps its layout.
+    await board.move_to(2)
+    assert await store.board_layout() == "project"

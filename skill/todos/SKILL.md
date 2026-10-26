@@ -21,17 +21,19 @@ curl -sS -H "Authorization: Bearer $TODO_API_KEY" -H "Content-Type: application/
 
 | Action | Request |
 |---|---|
-| List todos | `GET /todos?status=open` (`open` is the default; also `done` or `all`). Add `&assignee_id=<id>` to filter by person |
+| List todos | `GET /todos?status=open` (`open` is the default; also `done` or `all`). Add `&assignee_id=<id>` to filter by person, `&project=<name>` by project |
 | Get one | `GET /todos/{id}` |
-| Add | `POST /todos` with `{"title": "...", "assignee_id": "<id>"}` (`assignee_id` is optional) |
+| Add | `POST /todos` with `{"title": "...", "project": "...", "assignee_id": "<id>"}` (`project` and `assignee_id` are optional) |
 | Complete / reopen | `PATCH /todos/{id}` with `{"done": true}` / `{"done": false}` |
 | Rename | `PATCH /todos/{id}` with `{"title": "..."}` |
 | Assign / unassign | `PATCH /todos/{id}` with `{"assignee_id": "<id>"}` / `{"assignee_id": null}` |
+| Set / clear project | `PATCH /todos/{id}` with `{"project": "..."}` / `{"project": null}` |
 | Delete | `DELETE /todos/{id}` (returns 204) |
 | Several changes at once | `POST /todos/batch` with a list of ops, see below |
 | Server members | `GET /members`, returns `[{"id", "name", "username"}]` |
+| Projects in use | `GET /projects`, returns a list of names |
 
-A todo looks like: `{"id", "title", "done", "assignee_id", "assignee_name", "created_by", "created_at", "done_at"}`.
+A todo looks like: `{"id", "title", "project", "done", "assignee_id", "assignee_name", "created_by", "created_at", "done_at"}`.
 
 ## Batch
 
@@ -39,7 +41,7 @@ For more than one change, send a single `POST /todos/batch` instead of one reque
 
 ```json
 [
-  {"op": "create", "title": "...", "assignee_id": "<id>", "done": false},
+  {"op": "create", "title": "...", "project": "...", "assignee_id": "<id>", "done": false},
   {"op": "update", "id": 7, "done": true},
   {"op": "delete", "id": 3}
 ]
@@ -51,9 +53,10 @@ To delete everything, list the todos with `status=all` and send one delete op pe
 
 ## Rules
 
+- The project goes in the `project` field, never in the title. Projects are lowercased when saved; `null` or `""` means no project. Check `GET /projects` before using a new name, so a typo doesn't start a new project.
 - Discord user IDs are **strings** in both requests and responses. Never send them as numbers, because they lose precision.
 - To assign by name ("give it to sam"), call `GET /members` first and match on `name` or `username`, ignoring case. If several people match, or none do, ask the user instead of guessing.
 - When the user names a todo by its text rather than its number, list the todos and match on the title. If more than one todo matches, ask which one.
 - Ask for confirmation before deleting, and once for a whole batch rather than per todo. Completing, reopening and assigning need no confirmation.
-- Show lists compactly, one line per todo: `#12 ⬜ Fix login — Sam` (use ✅ for done ones).
+- Show lists compactly, one line per todo: `#12 ⬜ tibia-engine: Fix login — Sam` (use ✅ for done ones, and leave the project out when there is none).
 - Errors: `401` means a bad key, `404` means the todo doesn't exist, `422` means invalid input or an assignee who isn't in the server (the message says which), and `503` from `/members` means the bot is still connecting, so try again shortly.

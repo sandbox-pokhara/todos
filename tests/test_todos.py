@@ -1,5 +1,7 @@
 from collections.abc import AsyncIterator
+from pathlib import Path
 
+import aiosqlite
 import httpx
 import pytest
 
@@ -179,3 +181,58 @@ async def test_api_batch_is_all_or_nothing(client: httpx.AsyncClient) -> None:
     assert (await client.post("/todos/batch", json=[])).status_code == 422
 
     assert (await client.get("/todos?status=all")).json() == []
+
+
+@pytest.mark.anyio
+async def test_api_projects(client: httpx.AsyncClient) -> None:
+    r = await client.post("/todos", json={"title": "Fix login", "project": " Tibia "})
+    todo = r.json()
+    assert todo["project"] == "tibia"  # trimmed and lowercased
+    assert (await client.post("/todos", json={"title": "Loose"})).json()[
+        "project"
+    ] is None
+    r = await client.post("/todos", json={"title": "Blank", "project": ""})
+    assert r.json()["project"] is None
+
+    r = await client.patch(f"/todos/{todo['id']}", json={"title": "Fix logins"})
+    assert r.json()["project"] == "tibia"  # untouched
+    r = await client.patch(f"/todos/{todo['id']}", json={"project": "smurfskins"})
+    assert r.json()["project"] == "smurfskins"
+
+    r = await client.post(
+        "/todos/batch", json=[{"op": "create", "title": "Batch", "project": "api"}]
+    )
+    assert r.json()[0]["project"] == "api"
+    assert (await client.get("/projects")).json() == ["api", "smurfskins"]
+    r = await client.get("/todos", params={"project": "SMURFSKINS"})
+    assert [t["id"] for t in r.json()] == [todo["id"]]
+
+    r = await client.patch(f"/todos/{todo['id']}", json={"project": None})
+    assert r.json()["project"] is None
+
+
+@pytest.mark.anyio
+async def test_migrates_title_prefixes(tmp_path: Path) -> None:
+    path = str(tmp_path / "old.db")
+    async with aiosqlite.connect(path) as db:
+        await db.execute(
+            "CREATE TABLE todos (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " title TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0,"
+            " assignee_id INTEGER, created_by INTEGER, created_at TEXT NOT NULL,"
+            " done_at TEXT)"
+        )
+        await db.executemany(
+            "INSERT INTO todos (title, created_at) VALUES (?, '2026-10-01T00:00:00')",
+            [("Tibia-Engine: Fix login",), ("Meet at 10:30",), ("No project",)],
+        )
+        await db.commit()
+    store = await TodoStore.open(path)
+    try:
+        todos = await store.list_todos("all")
+        assert [(t.project, t.title) for t in todos] == [
+            ("tibia-engine", "Fix login"),
+            (None, "Meet at 10:30"),
+            (None, "No project"),
+        ]
+    finally:
+        await store.close()

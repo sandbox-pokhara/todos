@@ -18,6 +18,15 @@ The board is a set of embeds in one channel, which the bot edits in place:
 - **Completed - Sep 29, 2026**: one message for each day that has completed todos, oldest at the top. Each lists that day's todos as `#12 Fix login ✅`, and the footer counts them (`3 todos done`). Days are in UTC. If a day outgrows its embed, the list ends with "…and N more", but the footer still counts every todo. When every todo from a day is reopened or deleted, that day's message is removed.
 - **TODO**: every open todo, as `#12 Fix login`, at the bottom, with a footer that counts them (`5 todos open`). If the list outgrows the embed, it ends with "…and N more", but the footer still counts every todo.
 
+Each todo can have a project, such as `tibia-engine`, or none. The board shows it in front of the title (`#12 tibia-engine: Fix login`). Projects are lowercased when saved, so `Tibia-Engine` and `tibia-engine` are the same project.
+
+Two buttons under TODO switch how open todos are shown, for everyone looking at the board:
+
+- **List**: one line per todo, as above.
+- **By project**: the same TODO embed, with a bold heading for each project, in name order, and the todos under it without the project in front. Todos without a project come last, under **No project**.
+
+Anyone can press the buttons. The choice is saved and survives restarts and `/todo board`.
+
 Assignees aren't shown on the board. `/todo list` and the command replies show them.
 
 The bot updates the board whenever a todo changes, whether the change came from a slash command or the API. Discord can only add messages at the bottom of a channel, so the first todo completed on a new day posts that day's message and posts TODO again below it. Run `/todo board` in another channel to move the board there; the old messages are deleted. Only members with **Manage Server** can run it. If someone deletes a day's message, the bot posts that day and everything below it again, so the order stays the same.
@@ -28,15 +37,16 @@ Command replies are ephemeral: only the person who ran the command sees them. To
 
 | Command | |
 |---|---|
-| `/todo add <title> [assignee]` | Add a todo |
-| `/todo list [status] [assignee]` | Show open, done or all todos, just to you |
+| `/todo add <title> [assignee] [project]` | Add a todo |
+| `/todo list [status] [assignee] [project]` | Show open, done or all todos, just to you |
 | `/todo done <todo>` / `/todo reopen <todo>` | Mark a todo done, or open it again |
 | `/todo assign <todo> [user]` | Assign a todo, or leave `user` empty to unassign |
+| `/todo project <todo> [project]` | Set a todo's project, or leave `project` empty to clear it |
 | `/todo edit <todo> <title>` | Rename |
 | `/todo delete <todo>` | Delete |
 | `/todo board` | Post the board in this channel, or move it here |
 
-The `<todo>` argument suggests matching todos as you type. Assignees are shown by name and are never pinged.
+The `<todo>` argument suggests matching todos as you type, and `project` suggests the projects already in use. Assignees are shown by name and are never pinged.
 
 ## Configuration
 

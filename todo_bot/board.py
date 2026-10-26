@@ -4,17 +4,20 @@ from datetime import date
 
 import discord
 
-from todo_bot.store import BoardLocation, DayMessage, Todo, TodoStore
+from todo_bot.store import BoardLayout, BoardLocation, DayMessage, Todo, TodoStore
 
 log = logging.getLogger(__name__)
 
 EMBED_LIMIT = 4000
+NO_PROJECT = "No project"
 # Batches bursts of changes into one edit and keeps well under Discord's rate limits.
 REFRESH_DELAY = 1.0
 
 
-def format_todo(todo: Todo, *, assignee: bool = False) -> str:
-    line = f"#{todo.id} {todo.title}"
+def format_todo(todo: Todo, *, assignee: bool = False, project: bool = True) -> str:
+    """`#12 tibia-engine: Fix login`, or without the project when `project` is off."""
+    title = f"{todo.project}: {todo.title}" if project and todo.project else todo.title
+    line = f"#{todo.id} {title}"
     if todo.done:
         line += " ✅"
     if assignee and todo.assignee_id:
@@ -23,18 +26,25 @@ def format_todo(todo: Todo, *, assignee: bool = False) -> str:
     return line
 
 
-def format_todos(todos: list[Todo], *, assignee: bool = False) -> str:
-    """One line per todo, cut off to fit in an embed description."""
+def _fit(entries: list[str]) -> str:
+    """One entry per todo, joined by lines, cut off to fit in an embed description."""
     lines: list[str] = []
     length = 0
-    for i, todo in enumerate(todos):
-        line = format_todo(todo, assignee=assignee)
-        if length + len(line) > EMBED_LIMIT:
-            lines.append(f"…and {len(todos) - i} more")
+    for i, entry in enumerate(entries):
+        if length + len(entry) > EMBED_LIMIT:
+            lines.append(f"…and {len(entries) - i} more")
             break
-        lines.append(line)
-        length += len(line) + 1
+        lines.append(entry)
+        length += len(entry) + 1
     return "\n".join(lines)
+
+
+def format_todos(todos: list[Todo], *, assignee: bool = False) -> str:
+    return _fit([format_todo(todo, assignee=assignee) for todo in todos])
+
+
+def _open_footer(todos: list[Todo]) -> str:
+    return f"{len(todos)} {'todo' if len(todos) == 1 else 'todos'} open"
 
 
 def render_todo(todos: list[Todo]) -> discord.Embed:
@@ -44,9 +54,30 @@ def render_todo(todos: list[Todo]) -> discord.Embed:
         color=discord.Color.blurple(),
     )
     if todos:
-        embed.set_footer(
-            text=f"{len(todos)} {'todo' if len(todos) == 1 else 'todos'} open"
-        )
+        embed.set_footer(text=_open_footer(todos))
+    return embed
+
+
+def group_by_project(todos: list[Todo]) -> dict[str | None, list[Todo]]:
+    """Todos by project, in name order, then those without one."""
+    groups: dict[str | None, list[Todo]] = {}
+    for todo in todos:
+        groups.setdefault(todo.project, []).append(todo)
+    return dict(sorted(groups.items(), key=lambda g: (g[0] is None, g[0] or "")))
+
+
+def render_todo_by_project(todos: list[Todo]) -> discord.Embed:
+    """Like render_todo, under a bold heading per project."""
+    entries: list[str] = []
+    for name, group in group_by_project(todos).items():
+        for i, todo in enumerate(group):
+            line = format_todo(todo, project=False)
+            # The heading rides on its first todo, so a cut-off never strands it.
+            heading = f"**{name or NO_PROJECT}**"
+            entries.append(f"\n{heading}\n{line}" if i == 0 else line)
+    embed = render_todo(todos)
+    if todos:
+        embed.description = _fit(entries).lstrip("\n")
     return embed
 
 
@@ -62,6 +93,39 @@ def render_day(day: date, todos: list[Todo]) -> discord.Embed:
 
 def _content(embed: discord.Embed) -> str:
     return f"{embed.title}\n{embed.description}\n{embed.footer.text}"
+
+
+LAYOUTS: dict[BoardLayout, str] = {"list": "List", "project": "By project"}
+
+
+class _LayoutButton(discord.ui.Button["LayoutPicker"]):
+    def __init__(
+        self, board: "Board", layout: BoardLayout, current: BoardLayout
+    ) -> None:
+        super().__init__(
+            label=LAYOUTS[layout],
+            custom_id=f"board-layout:{layout}",
+            style=discord.ButtonStyle.primary
+            if layout == current
+            else discord.ButtonStyle.secondary,
+        )
+        self.board = board
+        self.board_layout: BoardLayout = layout
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        await self.board.store.set_board_layout(self.board_layout)
+        self.board.request_refresh()
+
+
+class LayoutPicker(discord.ui.View):
+    """Buttons under TODO that switch the board between its layouts. The custom
+    ids are fixed, so `Client.add_view` keeps them working across restarts."""
+
+    def __init__(self, board: "Board", current: BoardLayout = "list") -> None:
+        super().__init__(timeout=None)
+        for layout in LAYOUTS:
+            self.add_item(_LayoutButton(board, layout, current))
 
 
 class Board:
@@ -153,11 +217,13 @@ class Board:
                 DayMessage(day, message.message_id, _content(embed))
             )
 
-        todo = render_todo(await self.store.list_todos("open"))
+        layout = await self.store.board_layout()
+        todo = await self._render_open(layout)
+        picker = LayoutPicker(self, layout)
         if repost_from is None and board:
             try:
                 await channel.get_partial_message(board.todo_message_id).edit(
-                    embed=todo
+                    embed=todo, view=picker
                 )
                 return
             except discord.NotFound:
@@ -172,11 +238,17 @@ class Board:
             await self.store.save_day_message(DayMessage(day, sent.id, _content(embed)))
             if day in posted:
                 stale.append(posted[day].message_id)
-        sent = await channel.send(embed=todo)
+        sent = await channel.send(embed=todo, view=picker)
         await self.store.set_board(BoardLocation(channel.id, sent.id))
         if board:
             stale.append(board.todo_message_id)
         await self._delete(channel.id, stale)
+
+    async def _render_open(self, layout: BoardLayout) -> discord.Embed:
+        todos = await self.store.list_todos("open")
+        if layout == "project":
+            return render_todo_by_project(todos)
+        return render_todo(todos)
 
     async def _delete(self, channel_id: int, message_ids: list[int]) -> None:
         channel = self._channel(channel_id)

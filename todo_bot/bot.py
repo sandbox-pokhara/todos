@@ -5,7 +5,7 @@ from typing import Literal
 import discord
 from discord import app_commands
 
-from todo_bot.board import Board, format_todo, format_todos
+from todo_bot.board import Board, LayoutPicker, format_todo, format_todos
 from todo_bot.directory import Member
 from todo_bot.store import Status, TodoStore
 
@@ -17,8 +17,20 @@ async def _todo_choices(
 ) -> list[app_commands.Choice[int]]:
     todos = await store.search(current, status=status)
     return [
-        app_commands.Choice(name=f"#{t.id} {t.title}"[:100], value=t.id) for t in todos
+        app_commands.Choice(name=format_todo(t, project=True)[:100], value=t.id)
+        for t in todos
     ]
+
+
+async def _project_choices(
+    store: TodoStore, current: str
+) -> list[app_commands.Choice[str]]:
+    """Projects in use that match, plus what's typed so a new one can be made."""
+    typed = current.strip().lower()
+    names = [p for p in await store.projects() if typed in p]
+    if typed and typed not in names:
+        names.insert(0, typed)
+    return [app_commands.Choice(name=n, value=n) for n in names[:25]]
 
 
 async def _not_found(interaction: discord.Interaction, todo_id: int) -> None:
@@ -59,35 +71,54 @@ class TodoCommands(app_commands.Group):
         )
 
     @app_commands.command(description="Add a todo")
-    @app_commands.describe(title="What needs doing", assignee="Who should do it")
+    @app_commands.describe(
+        title="What needs doing",
+        assignee="Who should do it",
+        project="Which project it's for",
+    )
     async def add(
         self,
         interaction: discord.Interaction,
         title: app_commands.Range[str, 1, 200],
         assignee: discord.Member | None = None,
+        project: app_commands.Range[str, 1, 50] | None = None,
     ) -> None:
         todo = await self.store.add(
             title,
             assignee_id=assignee.id if assignee else None,
             created_by=interaction.user.id,
+            project=project,
         )
         await interaction.response.send_message(
             f"Added {format_todo(todo, assignee=True)}", ephemeral=True
         )
 
+    @add.autocomplete("project")
+    async def _add_project_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        return await _project_choices(self.store, current)
+
     @app_commands.command(name="list", description="Show the todo list")
-    @app_commands.describe(status="Which todos to show", assignee="Only this person's")
+    @app_commands.describe(
+        status="Which todos to show",
+        assignee="Only this person's",
+        project="Only this project's",
+    )
     async def list_(
         self,
         interaction: discord.Interaction,
         status: Literal["open", "done", "all"] = "open",
         assignee: discord.Member | None = None,
+        project: str | None = None,
     ) -> None:
         todos = await self.store.list_todos(
-            status, assignee_id=assignee.id if assignee else None
+            status, assignee_id=assignee.id if assignee else None, project=project
         )
-        title = f"Todos ({status})" + (
-            f" for {assignee.display_name}" if assignee else ""
+        title = (
+            f"Todos ({status})"
+            + (f" for {assignee.display_name}" if assignee else "")
+            + (f" in {project.strip().lower()}" if project else "")
         )
         embed = discord.Embed(
             title=title,
@@ -95,6 +126,17 @@ class TodoCommands(app_commands.Group):
             color=discord.Color.blurple(),
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @list_.autocomplete("project")
+    async def _list_project_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        typed = current.strip().lower()
+        return [
+            app_commands.Choice(name=p, value=p)
+            for p in await self.store.projects()
+            if typed in p
+        ][:25]
 
     @app_commands.command(description="Mark a todo as done")
     async def done(self, interaction: discord.Interaction, todo: int) -> None:
@@ -146,6 +188,35 @@ class TodoCommands(app_commands.Group):
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[int]]:
         return await _todo_choices(self.store, current, "all")
+
+    @app_commands.command(
+        description="Set a todo's project (leave project empty to clear it)"
+    )
+    async def project(
+        self,
+        interaction: discord.Interaction,
+        todo: int,
+        project: app_commands.Range[str, 1, 50] | None = None,
+    ) -> None:
+        updated = await self.store.update(todo, project=project)
+        if not updated:
+            return await _not_found(interaction, todo)
+        verb = "Moved" if updated.project else "Cleared project"
+        await interaction.response.send_message(
+            f"{verb}: {format_todo(updated, assignee=True)}", ephemeral=True
+        )
+
+    @project.autocomplete("todo")
+    async def _project_todo_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[int]]:
+        return await _todo_choices(self.store, current, "all")
+
+    @project.autocomplete("project")
+    async def _project_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        return await _project_choices(self.store, current)
 
     @app_commands.command(description="Rename a todo")
     async def edit(
@@ -202,6 +273,7 @@ class TodoBot(discord.Client):
         guild = discord.Object(id=self.guild_id)
         self.tree.add_command(TodoCommands(self.store, self.board), guild=guild)
         await self.tree.sync(guild=guild)
+        self.add_view(LayoutPicker(self.board))
         self._board_task = asyncio.create_task(self.board.run())
 
     async def close(self) -> None:
