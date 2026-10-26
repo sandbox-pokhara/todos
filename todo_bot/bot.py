@@ -1,13 +1,13 @@
 import asyncio
 import logging
-from typing import Literal
+from typing import Literal, cast
 
 import discord
 from discord import app_commands
 
-from todo_bot.board import Board, LayoutPicker, format_todo, format_todos
+from todo_bot.board import Board, format_todo, format_todos
 from todo_bot.directory import Member
-from todo_bot.store import Status, TodoStore
+from todo_bot.store import BoardLayout, Status, TodoStore
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +68,28 @@ class TodoCommands(app_commands.Group):
         await self._board.move_to(interaction.channel_id)
         await interaction.followup.send(
             "The board lives here now. It updates itself whenever a todo changes."
+        )
+
+    @app_commands.command(description="Change how the board shows open todos")
+    @app_commands.describe(layout="A plain list, or grouped under each project")
+    @app_commands.choices(
+        layout=[
+            app_commands.Choice(name="List", value="list"),
+            app_commands.Choice(name="By project", value="project"),
+        ]
+    )
+    async def view(
+        self, interaction: discord.Interaction, layout: app_commands.Choice[str]
+    ) -> None:
+        if not await self.store.get_board():
+            await interaction.response.send_message(
+                "There's no board yet. Run `/todo board` first.", ephemeral=True
+            )
+            return
+        await self.store.set_board_layout(cast(BoardLayout, layout.value))
+        self._board.request_refresh()
+        await interaction.response.send_message(
+            f"The board now shows open todos as: {layout.name}.", ephemeral=True
         )
 
     @app_commands.command(description="Add a todo")
@@ -273,7 +295,6 @@ class TodoBot(discord.Client):
         guild = discord.Object(id=self.guild_id)
         self.tree.add_command(TodoCommands(self.store, self.board), guild=guild)
         await self.tree.sync(guild=guild)
-        self.add_view(LayoutPicker(self.board))
         self._board_task = asyncio.create_task(self.board.run())
 
     async def close(self) -> None:

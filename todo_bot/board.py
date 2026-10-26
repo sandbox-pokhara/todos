@@ -95,39 +95,6 @@ def _content(embed: discord.Embed) -> str:
     return f"{embed.title}\n{embed.description}\n{embed.footer.text}"
 
 
-LAYOUTS: dict[BoardLayout, str] = {"list": "List", "project": "By project"}
-
-
-class _LayoutButton(discord.ui.Button["LayoutPicker"]):
-    def __init__(
-        self, board: "Board", layout: BoardLayout, current: BoardLayout
-    ) -> None:
-        super().__init__(
-            label=LAYOUTS[layout],
-            custom_id=f"board-layout:{layout}",
-            style=discord.ButtonStyle.primary
-            if layout == current
-            else discord.ButtonStyle.secondary,
-        )
-        self.board = board
-        self.board_layout: BoardLayout = layout
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
-        await self.board.store.set_board_layout(self.board_layout)
-        self.board.request_refresh()
-
-
-class LayoutPicker(discord.ui.View):
-    """Buttons under TODO that switch the board between its layouts. The custom
-    ids are fixed, so `Client.add_view` keeps them working across restarts."""
-
-    def __init__(self, board: "Board", current: BoardLayout = "list") -> None:
-        super().__init__(timeout=None)
-        for layout in LAYOUTS:
-            self.add_item(_LayoutButton(board, layout, current))
-
-
 class Board:
     """The board channel: one Completed message per day (UTC) that has completed
     todos, oldest first, then the open todos below them. Messages are edited in
@@ -219,11 +186,12 @@ class Board:
 
         layout = await self.store.board_layout()
         todo = await self._render_open(layout)
-        picker = LayoutPicker(self, layout)
         if repost_from is None and board:
             try:
                 await channel.get_partial_message(board.todo_message_id).edit(
-                    embed=todo, view=picker
+                    # view=None strips the layout buttons older versions added.
+                    embed=todo,
+                    view=None,
                 )
                 return
             except discord.NotFound:
@@ -238,7 +206,7 @@ class Board:
             await self.store.save_day_message(DayMessage(day, sent.id, _content(embed)))
             if day in posted:
                 stale.append(posted[day].message_id)
-        sent = await channel.send(embed=todo, view=picker)
+        sent = await channel.send(embed=todo)
         await self.store.set_board(BoardLocation(channel.id, sent.id))
         if board:
             stale.append(board.todo_message_id)

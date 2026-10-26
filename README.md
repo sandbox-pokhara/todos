@@ -20,12 +20,12 @@ The board is a set of embeds in one channel, which the bot edits in place:
 
 Each todo can have a project, such as `tibia-engine`, or none. The board shows it in front of the title (`#12 tibia-engine: Fix login`). Projects are lowercased when saved, so `Tibia-Engine` and `tibia-engine` are the same project.
 
-Two buttons under TODO switch how open todos are shown, for everyone looking at the board:
+`/todo view` switches how open todos are shown, for everyone looking at the board:
 
 - **List**: one line per todo, as above.
 - **By project**: the same TODO embed, with a bold heading for each project, in name order, and the todos under it without the project in front. Todos without a project come last, under **No project**.
 
-Anyone can press the buttons. The choice is saved and survives restarts and `/todo board`.
+Anyone can run it. The choice is saved and survives restarts and `/todo board`.
 
 Assignees aren't shown on the board. `/todo list` and the command replies show them.
 
@@ -45,6 +45,7 @@ Command replies are ephemeral: only the person who ran the command sees them. To
 | `/todo edit <todo> <title>` | Rename |
 | `/todo delete <todo>` | Delete |
 | `/todo board` | Post the board in this channel, or move it here |
+| `/todo view <layout>` | Show open todos on the board as a list, or by project |
 
 The `<todo>` argument suggests matching todos as you type, and `project` suggests the projects already in use. Assignees are shown by name and are never pinged.
 

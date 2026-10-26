@@ -279,17 +279,13 @@ async def test_layout_switch(store: TodoStore) -> None:
     location = await store.get_board()
     assert location
     assert await store.board_layout() == "list"
-    picker = channel.views[location.todo_message_id]
-    assert picker
-    assert [cast(discord.ui.Button[Any], b).custom_id for b in picker.children] == [
-        "board-layout:list",
-        "board-layout:project",
-    ]
 
+    channel.views[location.todo_message_id] = discord.ui.View()  # old buttons
     await store.set_board_layout("project")
     await refresh(board)
     todo = channel.messages[location.todo_message_id]
     assert (todo.description or "").startswith("**smurfskins**")
+    assert channel.views[location.todo_message_id] is None  # buttons removed
 
     # Moving the board keeps its layout.
     await board.move_to(2)
