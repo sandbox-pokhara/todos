@@ -272,9 +272,16 @@ class TodoBot(discord.Client):
             try:
                 await self.tree.sync(guild=guild)
             except discord.Forbidden:
-                # Not invited yet: commands appear once it is and the bot restarts.
-                log.warning("Not in server %s; skipping its commands", guild_id)
+                # Not invited yet: on_guild_join registers them once it is.
+                log.warning("Not in server %s yet; skipping its commands", guild_id)
             self._board_tasks.append(asyncio.create_task(board.run()))
+
+    async def on_guild_join(self, guild: discord.Guild) -> None:
+        if guild.id in self.boards:
+            await self.tree.sync(guild=guild)
+            log.info("Joined server %s; registered its commands", guild.id)
+        else:
+            log.warning("Joined server %s, which isn't configured", guild.id)
 
     async def close(self) -> None:
         for task in self._board_tasks:

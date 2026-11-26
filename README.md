@@ -11,7 +11,7 @@ One bot can serve several Discord servers, such as one for work and one for pers
 1. Create an application at <https://discord.com/developers/applications>. Under **Bot**, copy the token.
 2. Invite the bot. Under **OAuth2 → URL Generator**, pick the scopes `bot` and `applications.commands` and the permissions `Send Messages` and `Embed Links`, then open the generated URL.
 3. Get your server ID: turn on Developer Mode, right-click the server, then **Copy Server ID**.
-4. Add the server and a new API key for it to `GUILDS` (see [Configuration](#configuration)) and restart the bot. Slash commands are only registered in the servers listed there.
+4. Add the server and a new API key for it to `GUILDS` (see [Configuration](#configuration)) and restart the bot. Slash commands are only registered in the servers listed there. If the bot is invited after it starts, it registers them when it joins.
 5. In the channel you want as the board, run `/todo board`.
 
 To add another server, invite the same bot there and repeat steps 3 to 5.
