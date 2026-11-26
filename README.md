@@ -4,12 +4,17 @@ Discord bot for managing a server's shared todo list, with a REST API (and a Cla
 
 The bot and the API run in one process and share one SQLite database.
 
+One bot can serve several Discord servers, such as one for work and one for personal todos. Each server's todos, projects and board are kept apart: commands in a server, and its API key, only ever see that server's todos. Another server's todo is answered with "not found", the same as one that doesn't exist. Todo numbers are shared across servers, so a server's numbers can skip.
+
 ## Discord setup
 
 1. Create an application at <https://discord.com/developers/applications>. Under **Bot**, copy the token.
 2. Invite the bot. Under **OAuth2 → URL Generator**, pick the scopes `bot` and `applications.commands` and the permissions `Send Messages` and `Embed Links`, then open the generated URL.
 3. Get your server ID: turn on Developer Mode, right-click the server, then **Copy Server ID**.
-4. In the channel you want as the board, run `/todo board`.
+4. Add the server and a new API key for it to `GUILDS` (see [Configuration](#configuration)) and restart the bot. Slash commands are only registered in the servers listed there.
+5. In the channel you want as the board, run `/todo board`.
+
+To add another server, invite the same bot there and repeat steps 3 to 5.
 
 ## The board
 
@@ -51,10 +56,12 @@ The `<todo>` argument suggests matching todos as you type, and `project` suggest
 | Env var | |
 |---|---|
 | `DISCORD_TOKEN` | Bot token (required) |
-| `GUILD_ID` | Server ID; slash commands are registered there only (required) |
-| `API_KEY` | Bearer token for the API (required). Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| `GUILDS` | The servers to serve, each with its own API key: `<server id>:<api key>,<server id>:<api key>`. Every key must be different and at least 16 characters. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| `GUILD_ID`, `API_KEY` | One server and its key, the older way to configure the bot. They can be combined with `GUILDS`; that server comes first |
 | `DATABASE_PATH` | SQLite file (default `todos.db`; `/data/todos.db` in Docker) |
 | `PORT` | API port (default `8000`) |
+
+One of `GUILDS` or `GUILD_ID` with `API_KEY` is required. Todos from before the bot served several servers belong to the first server listed (`GUILD_ID` if it's set), so keep that server first.
 
 ## Run locally
 
@@ -72,7 +79,7 @@ Interactive API docs are served at <http://localhost:8000/docs>.
 dokku apps:create todos
 dokku storage:ensure-directory todos
 dokku storage:mount todos /var/lib/dokku/data/storage/todos:/data
-dokku config:set todos DISCORD_TOKEN=... GUILD_ID=... API_KEY=...
+dokku config:set todos DISCORD_TOKEN=... GUILDS=<server id>:<api key>
 dokku ports:set todos http:80:8000
 dokku checks:disable todos   # see below
 dokku checks:set todos wait-to-retire 0
@@ -90,7 +97,7 @@ The storage mount keeps the database across deploys. Without it, every deploy wi
 
 ## API
 
-Every endpoint except `/health` needs `Authorization: Bearer $API_KEY`. Discord user IDs (`created_by`) are strings.
+Every endpoint except `/health` needs `Authorization: Bearer <api key>`, and works on the todos of the server that key belongs to. Discord IDs (`created_by`, the server id) are strings.
 
 | Method | Path | |
 |---|---|---|
@@ -101,6 +108,7 @@ Every endpoint except `/health` needs `Authorization: Bearer $API_KEY`. Discord 
 | `DELETE` | `/todos/{id}` | Delete |
 | `POST` | `/todos/batch` | Apply up to 200 changes in one request, all or nothing (see below) |
 | `GET` | `/projects` | Every project in use, by name |
+| `GET` | `/server` | The server this key belongs to: `{"id", "name"}` (`name` is null until Discord connects) |
 | `GET` | `/health` | Liveness check, plus whether Discord is connected |
 
 ## Claude Code skill
@@ -117,10 +125,13 @@ Then add the connection details to `~/.claude/settings.json`:
 {
   "env": {
     "TODO_API_URL": "https://todos.example.com",
-    "TODO_API_KEY": "..."
+    "TODO_API_KEY_WORK": "...",
+    "TODO_API_KEY_PERSONAL": "..."
   }
 }
 ```
+
+There's one `TODO_API_KEY_<NAME>` per server; the name is what you call the server when you talk to Claude. A plain `TODO_API_KEY` also works, for a single server.
 
 ## Development
 

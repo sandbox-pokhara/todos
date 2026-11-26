@@ -11,9 +11,11 @@ from todo_bot.store import TodoStore
 
 async def main() -> None:
     settings = Settings.from_env()
-    store = await TodoStore.open(settings.database_path)
-    bot = TodoBot(store, settings.guild_id)
-    app = create_app(store, bot.ready, settings.api_key)
+    store = await TodoStore.open(
+        settings.database_path, legacy_guild_id=settings.guilds[0].id
+    )
+    bot = TodoBot(store, [g.id for g in settings.guilds])
+    app = create_app(store, settings.guilds, bot.is_ready, bot.guild_name)
     server = uvicorn.Server(
         uvicorn.Config(app, host="0.0.0.0", port=settings.port, log_config=None)
     )

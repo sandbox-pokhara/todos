@@ -1,5 +1,5 @@
 import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import Annotated, Literal
 
@@ -7,10 +7,12 @@ from fastapi import Body, Depends, FastAPI, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
+from todo_bot.config import Guild
 from todo_bot.store import (
     UNSET,
     Create,
     Delete,
+    GuildStore,
     Op,
     Status,
     Todo,
@@ -67,19 +69,34 @@ BatchOp = Annotated[CreateOp | UpdateOp | DeleteOp, Field(discriminator="op")]
 MAX_BATCH = 200
 
 
+class ServerOut(BaseModel):
+    id: str
+    name: str | None  # None until the bot has connected to the server
+
+
 def create_app(
-    store: TodoStore, discord_ready: Callable[[], bool], api_key: str
+    store: TodoStore,
+    guilds: Sequence[Guild],
+    discord_ready: Callable[[], bool],
+    guild_name: Callable[[int], str | None] = lambda _: None,
 ) -> FastAPI:
+    """The API. Each key reaches exactly one server's todos: every endpoint
+    works on the server whose key was sent, and sees nothing of the others."""
     bearer = HTTPBearer(auto_error=False)
 
-    def require_key(
+    def server_todos(
         creds: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
-    ) -> None:
-        if not creds or not secrets.compare_digest(creds.credentials, api_key):
+    ) -> GuildStore:
+        sent = creds.credentials.encode() if creds else b""
+        # Compare against every key, so the time taken doesn't hint at which matched.
+        matches = [
+            g for g in guilds if secrets.compare_digest(sent, g.api_key.encode())
+        ]
+        if not creds or not matches:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid API key")
+        return store.guild(matches[0].id)
 
     app = FastAPI(title="Todo Bot API")
-    auth = [Depends(require_key)]
 
     def to_out(todo: Todo) -> TodoOut:
         return TodoOut(
@@ -109,8 +126,8 @@ def create_app(
             case DeleteOp():
                 return Delete(op.id)
 
-    async def get_or_404(todo_id: int) -> Todo:
-        todo = await store.get(todo_id)
+    async def get_or_404(todos: GuildStore, todo_id: int) -> Todo:
+        todo = await todos.get(todo_id)
         if not todo:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"Todo {todo_id} not found")
         return todo
@@ -119,25 +136,39 @@ def create_app(
     async def health() -> dict[str, bool]:
         return {"ok": True, "discord_ready": discord_ready()}
 
-    @app.get("/todos", dependencies=auth)
+    @app.get("/server")
+    async def server(todos: Annotated[GuildStore, Depends(server_todos)]) -> ServerOut:
+        """The Discord server this key's todos belong to."""
+        return ServerOut(id=str(todos.guild_id), name=guild_name(todos.guild_id))
+
+    @app.get("/todos")
     async def list_todos(
-        status: Status = "open", project: str | None = None
+        todos: Annotated[GuildStore, Depends(server_todos)],
+        status: Status = "open",
+        project: str | None = None,
     ) -> list[TodoOut]:
-        todos = await store.list_todos(status, project=project)
-        return [to_out(t) for t in todos]
+        return [to_out(t) for t in await todos.list_todos(status, project=project)]
 
-    @app.post("/todos", dependencies=auth, status_code=status.HTTP_201_CREATED)
-    async def create_todo(body: TodoCreate) -> TodoOut:
-        return to_out(await store.add(body.title, project=body.project))
+    @app.post("/todos", status_code=status.HTTP_201_CREATED)
+    async def create_todo(
+        todos: Annotated[GuildStore, Depends(server_todos)], body: TodoCreate
+    ) -> TodoOut:
+        return to_out(await todos.add(body.title, project=body.project))
 
-    @app.get("/todos/{todo_id}", dependencies=auth)
-    async def get_todo(todo_id: int) -> TodoOut:
-        return to_out(await get_or_404(todo_id))
+    @app.get("/todos/{todo_id}")
+    async def get_todo(
+        todos: Annotated[GuildStore, Depends(server_todos)], todo_id: int
+    ) -> TodoOut:
+        return to_out(await get_or_404(todos, todo_id))
 
-    @app.patch("/todos/{todo_id}", dependencies=auth)
-    async def update_todo(todo_id: int, body: TodoPatch) -> TodoOut:
+    @app.patch("/todos/{todo_id}")
+    async def update_todo(
+        todos: Annotated[GuildStore, Depends(server_todos)],
+        todo_id: int,
+        body: TodoPatch,
+    ) -> TodoOut:
         try:
-            [updated] = await store.batch([to_update(todo_id, body)])
+            [updated] = await todos.batch([to_update(todo_id, body)])
         except TodoNotFound:
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, f"Todo {todo_id} not found"
@@ -145,8 +176,9 @@ def create_app(
         assert updated is not None
         return to_out(updated)
 
-    @app.post("/todos/batch", dependencies=auth)
+    @app.post("/todos/batch")
     async def batch(
+        todos: Annotated[GuildStore, Depends(server_todos)],
         ops: Annotated[list[BatchOp], Body(min_length=1, max_length=MAX_BATCH)],
     ) -> list[TodoOut | None]:
         """Apply several changes at once, in order, all or nothing.
@@ -154,7 +186,7 @@ def create_app(
         Returns one result per op: the todo as it ends up, or null for a delete.
         """
         try:
-            results = await store.batch([to_op(op) for op in ops])
+            results = await todos.batch([to_op(op) for op in ops])
         except TodoNotFound as e:
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND,
@@ -162,16 +194,18 @@ def create_app(
             ) from None
         return [to_out(t) if t else None for t in results]
 
-    @app.delete(
-        "/todos/{todo_id}", dependencies=auth, status_code=status.HTTP_204_NO_CONTENT
-    )
-    async def delete_todo(todo_id: int) -> None:
-        await get_or_404(todo_id)
-        await store.delete(todo_id)
+    @app.delete("/todos/{todo_id}", status_code=status.HTTP_204_NO_CONTENT)
+    async def delete_todo(
+        todos: Annotated[GuildStore, Depends(server_todos)], todo_id: int
+    ) -> None:
+        if not await todos.delete(todo_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Todo {todo_id} not found")
 
-    @app.get("/projects", dependencies=auth)
-    async def list_projects() -> list[str]:
+    @app.get("/projects")
+    async def list_projects(
+        todos: Annotated[GuildStore, Depends(server_todos)],
+    ) -> list[str]:
         """Every project some todo has, by name."""
-        return await store.projects()
+        return await todos.projects()
 
     return app

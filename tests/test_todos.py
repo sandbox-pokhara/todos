@@ -6,9 +6,12 @@ import httpx
 import pytest
 
 from todo_bot.api import create_app
-from todo_bot.store import TodoStore
+from todo_bot.config import Guild
+from todo_bot.store import GuildNotSet, GuildStore, TodoStore
 
-API_KEY = "test-key"
+API_KEY = "test-key-for-work"
+WORK = Guild(1001, API_KEY)
+PERSONAL = Guild(2002, "test-key-for-personal")
 
 
 @pytest.fixture
@@ -17,25 +20,35 @@ def anyio_backend() -> str:
 
 
 @pytest.fixture
-async def store() -> AsyncIterator[TodoStore]:
+async def db() -> AsyncIterator[TodoStore]:
     s = await TodoStore.open(":memory:")
     yield s
     await s.close()
 
 
 @pytest.fixture
-async def client(store: TodoStore) -> AsyncIterator[httpx.AsyncClient]:
-    app = create_app(store, lambda: True, API_KEY)
-    async with httpx.AsyncClient(
+def store(db: TodoStore) -> GuildStore:
+    return db.guild(WORK.id)
+
+
+def api_client(db: TodoStore, guild: Guild) -> httpx.AsyncClient:
+    names = {WORK.id: "Work", PERSONAL.id: "Personal"}
+    app = create_app(db, [WORK, PERSONAL], lambda: True, names.get)
+    return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
         base_url="http://test",
-        headers={"Authorization": f"Bearer {API_KEY}"},
-    ) as c:
+        headers={"Authorization": f"Bearer {guild.api_key}"},
+    )
+
+
+@pytest.fixture
+async def client(db: TodoStore) -> AsyncIterator[httpx.AsyncClient]:
+    async with api_client(db, WORK) as c:
         yield c
 
 
 @pytest.mark.anyio
-async def test_store_lifecycle(store: TodoStore) -> None:
+async def test_store_lifecycle(store: GuildStore) -> None:
     todo = await store.add("Write docs", created_by=1)
     assert not todo.done and todo.created_by == 1
 
@@ -89,32 +102,32 @@ async def test_api_validation(client: httpx.AsyncClient) -> None:
 
 
 @pytest.mark.anyio
-async def test_store_notifies_changes(store: TodoStore) -> None:
-    changes: list[None] = []
-    store.add_listener(lambda: changes.append(None))
+async def test_store_notifies_changes(db: TodoStore, store: GuildStore) -> None:
+    changes: list[int] = []
+    db.add_listener(changes.append)
 
     todo = await store.add("Plan")
     await store.update(todo.id, done=True)
     await store.update(todo.id)  # nothing to change
     await store.delete(todo.id)
     await store.delete(todo.id)  # already gone
-    assert len(changes) == 3
+    assert changes == [WORK.id] * 3
 
 
 @pytest.mark.anyio
 async def test_api_changes_reach_the_board(
-    store: TodoStore, client: httpx.AsyncClient
+    db: TodoStore, client: httpx.AsyncClient
 ) -> None:
-    changes: list[None] = []
-    store.add_listener(lambda: changes.append(None))
+    changes: list[int] = []
+    db.add_listener(changes.append)
     await client.post("/todos", json={"title": "From Claude"})
-    assert changes
+    assert changes == [WORK.id]
 
 
 @pytest.mark.anyio
-async def test_api_batch(store: TodoStore, client: httpx.AsyncClient) -> None:
-    changes: list[None] = []
-    store.add_listener(lambda: changes.append(None))
+async def test_api_batch(db: TodoStore, client: httpx.AsyncClient) -> None:
+    changes: list[int] = []
+    db.add_listener(changes.append)
     old = (await client.post("/todos", json={"title": "Old"})).json()
     changes.clear()
 
@@ -206,7 +219,10 @@ async def test_migrates_title_prefixes(tmp_path: Path) -> None:
             [("Tibia-Engine: Fix login",), ("Meet at 10:30",), ("No project",)],
         )
         await db.commit()
-    store = await TodoStore.open(path)
+    with pytest.raises(GuildNotSet):
+        await TodoStore.open(path)
+    db = await TodoStore.open(path, legacy_guild_id=WORK.id)
+    store = db.guild(WORK.id)
     try:
         todos = await store.list_todos("all")
         assert [(t.project, t.title) for t in todos] == [
@@ -218,4 +234,4 @@ async def test_migrates_title_prefixes(tmp_path: Path) -> None:
         added = await store.add("New", project="todos")
         assert (await store.get(added.id)) == added
     finally:
-        await store.close()
+        await db.close()

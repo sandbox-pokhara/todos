@@ -8,7 +8,7 @@ import discord
 import pytest
 
 from todo_bot.board import Board, render_day, render_todo, render_todo_by_project
-from todo_bot.store import BoardLocation, TodoStore
+from todo_bot.store import BoardLocation, GuildStore, TodoStore
 
 CHANNEL_ID = 1
 
@@ -77,14 +77,22 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
+GUILD_ID = 1001
+
+
 @pytest.fixture
-async def store() -> AsyncIterator[TodoStore]:
+async def db() -> AsyncIterator[TodoStore]:
     s = await TodoStore.open(":memory:")
     yield s
     await s.close()
 
 
-def make_board(store: TodoStore) -> tuple[Board, FakeClient]:
+@pytest.fixture
+def store(db: TodoStore) -> GuildStore:
+    return db.guild(GUILD_ID)
+
+
+def make_board(store: GuildStore) -> tuple[Board, FakeClient]:
     client = FakeClient()
     return Board(cast(discord.Client, client), store), client
 
@@ -93,7 +101,7 @@ async def refresh(board: Board) -> None:
     await board._refresh()  # pyright: ignore[reportPrivateUsage]
 
 
-async def complete_on(store: TodoStore, title: str, day: date) -> int:
+async def complete_on(store: GuildStore, title: str, day: date) -> int:
     todo = await store.add(title)
     await store.update(todo.id, done=True)
     await store._db.execute(  # pyright: ignore[reportPrivateUsage]
@@ -110,7 +118,7 @@ SEP_28, SEP_29, SEP_30 = date(2026, 9, 28), date(2026, 9, 29), date(2026, 9, 30)
 
 
 @pytest.mark.anyio
-async def test_board_location(store: TodoStore) -> None:
+async def test_board_location(store: GuildStore) -> None:
     assert await store.get_board() is None
     await store.set_board(BoardLocation(1, 3))
     await store.set_board(BoardLocation(4, 6))
@@ -118,7 +126,7 @@ async def test_board_location(store: TodoStore) -> None:
 
 
 @pytest.mark.anyio
-async def test_render(store: TodoStore) -> None:
+async def test_render(store: GuildStore) -> None:
     assert render_todo([]).description == "Nothing to do"
     assert render_todo([]).footer.text is None
 
@@ -131,7 +139,7 @@ async def test_render(store: TodoStore) -> None:
 
 
 @pytest.mark.anyio
-async def test_done_by_day(store: TodoStore) -> None:
+async def test_done_by_day(store: GuildStore) -> None:
     a = await complete_on(store, "Ship it", SEP_29)
     b = await complete_on(store, "Old one", SEP_28)
     c = await complete_on(store, "Write docs", SEP_29)
@@ -149,7 +157,7 @@ async def test_done_by_day(store: TodoStore) -> None:
 
 
 @pytest.mark.anyio
-async def test_long_day_is_cut_off(store: TodoStore) -> None:
+async def test_long_day_is_cut_off(store: GuildStore) -> None:
     for i in range(40):
         await complete_on(store, f"{i:02} " + "x" * 190, SEP_29)
     embed = render_day(SEP_29, (await store.done_by_day())[SEP_29])
@@ -159,7 +167,7 @@ async def test_long_day_is_cut_off(store: TodoStore) -> None:
 
 
 @pytest.mark.anyio
-async def test_board_sync(store: TodoStore) -> None:
+async def test_board_sync(store: GuildStore) -> None:
     board, client = make_board(store)
     channel = client.channels[CHANNEL_ID]
 
@@ -221,15 +229,15 @@ async def test_board_sync(store: TodoStore) -> None:
 
 
 @pytest.mark.anyio
-async def test_replaces_legacy_completed_message(store: TodoStore) -> None:
+async def test_replaces_legacy_completed_message(store: GuildStore) -> None:
     board, client = make_board(store)
     channel = client.channels[CHANNEL_ID]
     legacy = await channel.send(embed=discord.Embed(title="Completed"))
     todo = await channel.send(embed=discord.Embed(title="TODO"))
     await store._db.execute(  # pyright: ignore[reportPrivateUsage]
-        "INSERT INTO board (id, channel_id, message_id, done_message_id)"
-        " VALUES (1, ?, ?, ?)",
-        (CHANNEL_ID, todo.id, legacy.id),
+        "INSERT INTO boards (guild_id, channel_id, message_id, done_message_id)"
+        " VALUES (?, ?, ?, ?)",
+        (GUILD_ID, CHANNEL_ID, todo.id, legacy.id),
     )
     await complete_on(store, "Old one", SEP_28)
     await refresh(board)
@@ -237,7 +245,7 @@ async def test_replaces_legacy_completed_message(store: TodoStore) -> None:
 
 
 @pytest.mark.anyio
-async def test_render_by_project(store: TodoStore) -> None:
+async def test_render_by_project(store: GuildStore) -> None:
     assert render_todo_by_project([]).description == "Nothing to do"
 
     a = await store.add("Fix login", project="smurfskins")
@@ -261,7 +269,7 @@ async def test_render_by_project(store: TodoStore) -> None:
 
 
 @pytest.mark.anyio
-async def test_long_project_list_is_cut_off(store: TodoStore) -> None:
+async def test_long_project_list_is_cut_off(store: GuildStore) -> None:
     for i in range(40):
         await store.add(f"{i:02} " + "x" * 190, project=f"p{i % 3}")
     embed = render_todo_by_project(await store.list_todos("open"))
@@ -271,7 +279,7 @@ async def test_long_project_list_is_cut_off(store: TodoStore) -> None:
 
 
 @pytest.mark.anyio
-async def test_layout_switch(store: TodoStore) -> None:
+async def test_layout_switch(store: GuildStore) -> None:
     board, client = make_board(store)
     channel = client.channels[CHANNEL_ID]
     await store.add("Fix login", project="smurfskins")

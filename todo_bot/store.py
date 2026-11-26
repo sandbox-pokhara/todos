@@ -15,6 +15,7 @@ BoardLayout = Literal["list", "project"]
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS todos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,  -- the Discord server the todo belongs to
     title TEXT NOT NULL,
     project TEXT,
     done INTEGER NOT NULL DEFAULT 0,
@@ -23,19 +24,22 @@ CREATE TABLE IF NOT EXISTS todos (
     created_at TEXT NOT NULL,
     done_at TEXT
 );
-CREATE TABLE IF NOT EXISTS board (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
+CREATE TABLE IF NOT EXISTS boards (
+    guild_id INTEGER PRIMARY KEY,
     channel_id INTEGER NOT NULL,
     message_id INTEGER NOT NULL,
     done_message_id INTEGER,  -- the old single Completed message, until replaced
     layout TEXT NOT NULL DEFAULT 'list'
 );
-CREATE TABLE IF NOT EXISTS day_messages (
-    day TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS guild_day_messages (
+    guild_id INTEGER NOT NULL,
+    day TEXT NOT NULL,
     message_id INTEGER NOT NULL,
-    content TEXT NOT NULL
+    content TEXT NOT NULL,
+    PRIMARY KEY (guild_id, day)
 );
 """
+INDEXES = "CREATE INDEX IF NOT EXISTS todos_guild ON todos (guild_id, done, id);"
 
 
 class Unset(Enum):
@@ -126,61 +130,139 @@ class TodoNotFound(Exception):
         self.index = index  # position of the failing op in the batch
 
 
+class GuildNotSet(Exception):
+    """The database has todos from before servers were tracked, and no server
+    was named to give them to."""
+
+
 class TodoStore:
+    """The database connection, shared by every server.
+
+    Todos and boards are only reachable through `guild()`, which scopes every
+    query to one server, so one server can never read or change another's.
+    """
+
     def __init__(self, db: aiosqlite.Connection) -> None:
         self._db = db
-        self._listeners: list[Callable[[], None]] = []
+        self._listeners: list[Callable[[int], None]] = []
         # One shared connection means one transaction: writers take turns so a
         # commit can never sweep up half of someone else's batch.
         self._write_lock = asyncio.Lock()
 
-    def add_listener(self, listener: Callable[[], None]) -> None:
-        """Call `listener` after every change to the todos, from any source."""
+    def add_listener(self, listener: Callable[[int], None]) -> None:
+        """Call `listener(guild_id)` after every change to a server's todos,
+        from any source."""
         self._listeners.append(listener)
 
-    def _changed(self) -> None:
+    def _changed(self, guild_id: int) -> None:
         for listener in self._listeners:
-            listener()
+            listener(guild_id)
+
+    def guild(self, guild_id: int) -> "GuildStore":
+        return GuildStore(self, guild_id)
 
     @classmethod
-    async def open(cls, path: str) -> "TodoStore":
+    async def open(cls, path: str, legacy_guild_id: int | None = None) -> "TodoStore":
+        """Open the database, creating or upgrading it.
+
+        `legacy_guild_id` is the server that todos and the board from before
+        servers were tracked belong to. Only such a database needs it.
+        """
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         db = await aiosqlite.connect(path)
         db.row_factory = aiosqlite.Row
-        await db.execute("PRAGMA journal_mode=WAL")
-        await db.executescript(SCHEMA)
-        async with db.execute("PRAGMA table_info(board)") as cursor:
-            columns = {row["name"] for row in await cursor.fetchall()}
-        if "done_message_id" not in columns:
-            await db.execute("ALTER TABLE board ADD COLUMN done_message_id INTEGER")
-        if "layout" not in columns:
-            await db.execute(
-                "ALTER TABLE board ADD COLUMN layout TEXT NOT NULL DEFAULT 'list'"
-            )
-        async with db.execute("PRAGMA table_info(todos)") as cursor:
-            columns = {row["name"] for row in await cursor.fetchall()}
-        if "project" not in columns:
-            await db.execute("ALTER TABLE todos ADD COLUMN project TEXT")
-            async with db.execute("SELECT id, title FROM todos") as cursor:
-                rows = await cursor.fetchall()
-            for row in rows:
-                if match := _TITLE_PROJECT.fullmatch(row["title"]):
-                    await db.execute(
-                        "UPDATE todos SET project = ?, title = ? WHERE id = ?",
-                        (normalize_project(match[1]), match[2], row["id"]),
-                    )
-        await db.commit()
+        try:
+            await db.execute("PRAGMA journal_mode=WAL")
+            await _migrate(db, legacy_guild_id)
+        except BaseException:
+            await db.close()
+            raise
         return cls(db)
 
     async def close(self) -> None:
         await self._db.close()
 
+
+async def _columns(db: aiosqlite.Connection, table: str) -> set[str]:
+    async with db.execute(f"PRAGMA table_info({table})") as cursor:
+        return {row["name"] for row in await cursor.fetchall()}
+
+
+async def _migrate(db: aiosqlite.Connection, legacy_guild_id: int | None) -> None:
+    todo_columns = await _columns(db, "todos")
+    old_board = await _columns(db, "board")
+    old_days = await _columns(db, "day_messages")
+
+    # A database from before servers were tracked: it all belongs to one server.
+    unscoped = bool(todo_columns) and "guild_id" not in todo_columns
+    if (unscoped or old_board or old_days) and legacy_guild_id is None:
+        raise GuildNotSet(
+            "The database has todos from before servers were tracked;"
+            " name the server they belong to"
+        )
+    if unscoped:
+        await db.execute("ALTER TABLE todos ADD COLUMN guild_id INTEGER")
+        await db.execute("UPDATE todos SET guild_id = ?", (legacy_guild_id,))
+
+    await db.executescript(SCHEMA)
+
+    if old_board:
+        if "done_message_id" not in old_board:
+            await db.execute("ALTER TABLE board ADD COLUMN done_message_id INTEGER")
+        if "layout" not in old_board:
+            await db.execute(
+                "ALTER TABLE board ADD COLUMN layout TEXT NOT NULL DEFAULT 'list'"
+            )
+        await db.execute(
+            "INSERT OR IGNORE INTO boards"
+            " (guild_id, channel_id, message_id, done_message_id, layout)"
+            " SELECT ?, channel_id, message_id, done_message_id, layout FROM board",
+            (legacy_guild_id,),
+        )
+        await db.execute("DROP TABLE board")
+    if old_days:
+        await db.execute(
+            "INSERT OR IGNORE INTO guild_day_messages"
+            " (guild_id, day, message_id, content)"
+            " SELECT ?, day, message_id, content FROM day_messages",
+            (legacy_guild_id,),
+        )
+        await db.execute("DROP TABLE day_messages")
+
+    if "project" not in await _columns(db, "todos"):
+        await db.execute("ALTER TABLE todos ADD COLUMN project TEXT")
+        async with db.execute("SELECT id, title FROM todos") as cursor:
+            rows = await cursor.fetchall()
+        for row in rows:
+            if match := _TITLE_PROJECT.fullmatch(row["title"]):
+                await db.execute(
+                    "UPDATE todos SET project = ?, title = ? WHERE id = ?",
+                    (normalize_project(match[1]), match[2], row["id"]),
+                )
+    await db.executescript(INDEXES)
+    await db.commit()
+
+
+class GuildStore:
+    """One server's todos and board.
+
+    Every query is scoped to `guild_id`: another server's todo is reported as
+    not found, exactly like one that doesn't exist.
+    """
+
+    def __init__(self, store: TodoStore, guild_id: int) -> None:
+        self._store = store
+        self._db = store._db  # pyright: ignore[reportPrivateUsage]
+        self._write_lock = store._write_lock  # pyright: ignore[reportPrivateUsage]
+        self.guild_id = guild_id
+
     async def batch(self, ops: Sequence[Op]) -> list[Todo | None]:
         """Apply `ops` in order, all or nothing.
 
         Returns each op's todo as it ends up (None for deletes). Raises
-        TodoNotFound, having applied nothing, if an op names a missing todo.
+        TodoNotFound, having applied nothing, if an op names a todo this server
+        doesn't have.
         """
         async with self._write_lock:
             try:
@@ -190,15 +272,16 @@ class TodoStore:
                 raise
             await self._db.commit()
         if any(_writes(op) for op in ops):
-            self._changed()
+            self._store._changed(self.guild_id)  # pyright: ignore[reportPrivateUsage]
         return results
 
     async def _apply(self, op: Op, index: int) -> Todo | None:
         if isinstance(op, Create):
             cursor = await self._db.execute(
-                "INSERT INTO todos (title, project, created_by, created_at, done,"
-                " done_at) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO todos (guild_id, title, project, created_by, created_at,"
+                " done, done_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
+                    self.guild_id,
                     op.title,
                     normalize_project(op.project),
                     op.created_by,
@@ -209,7 +292,10 @@ class TodoStore:
             )
             return await self.get(cursor.lastrowid or 0)
         if isinstance(op, Delete):
-            cursor = await self._db.execute("DELETE FROM todos WHERE id = ?", (op.id,))
+            cursor = await self._db.execute(
+                "DELETE FROM todos WHERE id = ? AND guild_id = ?",
+                (op.id, self.guild_id),
+            )
             if cursor.rowcount == 0:
                 raise TodoNotFound(op.id, index)
             return None
@@ -226,7 +312,8 @@ class TodoStore:
             params.append(normalize_project(op.project))
         if sets:
             await self._db.execute(
-                f"UPDATE todos SET {', '.join(sets)} WHERE id = ?", [*params, op.id]
+                f"UPDATE todos SET {', '.join(sets)} WHERE id = ? AND guild_id = ?",
+                [*params, op.id, self.guild_id],
             )
         todo = await self.get(op.id)
         if not todo:
@@ -247,7 +334,8 @@ class TodoStore:
 
     async def get(self, todo_id: int) -> Todo | None:
         async with self._db.execute(
-            "SELECT * FROM todos WHERE id = ?", (todo_id,)
+            "SELECT * FROM todos WHERE id = ? AND guild_id = ?",
+            (todo_id, self.guild_id),
         ) as cursor:
             row = await cursor.fetchone()
         return _row_to_todo(row) if row else None
@@ -257,17 +345,17 @@ class TodoStore:
         status: Status = "open",
         project: str | None = None,
     ) -> list[Todo]:
-        clauses: list[str] = []
-        params: list[object] = []
+        clauses = ["guild_id = ?"]
+        params: list[object] = [self.guild_id]
         if status != "all":
             clauses.append("done = ?")
             params.append(1 if status == "done" else 0)
         if project := normalize_project(project):
             clauses.append("project = ?")
             params.append(project)
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         async with self._db.execute(
-            f"SELECT * FROM todos {where} ORDER BY done, id", params
+            f"SELECT * FROM todos WHERE {' AND '.join(clauses)} ORDER BY done, id",
+            params,
         ) as cursor:
             rows = await cursor.fetchall()
         return [_row_to_todo(row) for row in rows]
@@ -276,8 +364,16 @@ class TodoStore:
         self, query: str, status: Status = "all", limit: int = 25
     ) -> list[Todo]:
         """Match todos by id prefix, or title or project substring, for autocomplete."""
-        clauses = ["(CAST(id AS TEXT) LIKE ? OR title LIKE ? OR project LIKE ?)"]
-        params: list[object] = [f"{query.lstrip('#')}%", f"%{query}%", f"%{query}%"]
+        clauses = [
+            "guild_id = ?",
+            "(CAST(id AS TEXT) LIKE ? OR title LIKE ? OR project LIKE ?)",
+        ]
+        params: list[object] = [
+            self.guild_id,
+            f"{query.lstrip('#')}%",
+            f"%{query}%",
+            f"%{query}%",
+        ]
         if status != "all":
             clauses.append("done = ?")
             params.append(1 if status == "done" else 0)
@@ -314,8 +410,9 @@ class TodoStore:
     async def projects(self) -> list[str]:
         """Every project in use, by name, for autocomplete."""
         async with self._db.execute(
-            "SELECT DISTINCT project FROM todos WHERE project IS NOT NULL"
-            " ORDER BY project"
+            "SELECT DISTINCT project FROM todos"
+            " WHERE guild_id = ? AND project IS NOT NULL ORDER BY project",
+            (self.guild_id,),
         ) as cursor:
             rows = await cursor.fetchall()
         return [row["project"] for row in rows]
@@ -323,7 +420,8 @@ class TodoStore:
     async def done_by_day(self) -> dict[date, list[Todo]]:
         """Completed todos grouped by UTC completion date, oldest first."""
         async with self._db.execute(
-            "SELECT * FROM todos WHERE done = 1 ORDER BY done_at, id"
+            "SELECT * FROM todos WHERE guild_id = ? AND done = 1 ORDER BY done_at, id",
+            (self.guild_id,),
         ) as cursor:
             rows = await cursor.fetchall()
         days: dict[date, list[Todo]] = {}
@@ -335,7 +433,8 @@ class TodoStore:
 
     async def get_board(self) -> BoardLocation | None:
         async with self._db.execute(
-            "SELECT channel_id, message_id FROM board WHERE id = 1"
+            "SELECT channel_id, message_id FROM boards WHERE guild_id = ?",
+            (self.guild_id,),
         ) as cursor:
             row = await cursor.fetchone()
         if not row:
@@ -347,22 +446,26 @@ class TodoStore:
     async def set_board(self, location: BoardLocation) -> None:
         async with self._write_lock:
             await self._db.execute(
-                "INSERT INTO board (id, channel_id, message_id) VALUES (1, ?, ?)"
-                " ON CONFLICT (id) DO UPDATE SET channel_id = excluded.channel_id,"
+                "INSERT INTO boards (guild_id, channel_id, message_id) VALUES (?, ?, ?)"
+                " ON CONFLICT (guild_id) DO UPDATE SET"
+                " channel_id = excluded.channel_id,"
                 " message_id = excluded.message_id, done_message_id = NULL",
-                (location.channel_id, location.todo_message_id),
+                (self.guild_id, location.channel_id, location.todo_message_id),
             )
             await self._db.commit()
 
     async def board_layout(self) -> BoardLayout:
-        async with self._db.execute("SELECT layout FROM board WHERE id = 1") as cursor:
+        async with self._db.execute(
+            "SELECT layout FROM boards WHERE guild_id = ?", (self.guild_id,)
+        ) as cursor:
             row = await cursor.fetchone()
         return "project" if row and row["layout"] == "project" else "list"
 
     async def set_board_layout(self, layout: BoardLayout) -> None:
         async with self._write_lock:
             await self._db.execute(
-                "UPDATE board SET layout = ? WHERE id = 1", (layout,)
+                "UPDATE boards SET layout = ? WHERE guild_id = ?",
+                (layout, self.guild_id),
             )
             await self._db.commit()
 
@@ -370,10 +473,14 @@ class TodoStore:
         """The old single Completed message's id, if the board still has one."""
         async with self._write_lock:
             async with self._db.execute(
-                "SELECT done_message_id FROM board WHERE id = 1"
+                "SELECT done_message_id FROM boards WHERE guild_id = ?",
+                (self.guild_id,),
             ) as cursor:
                 row = await cursor.fetchone()
-            await self._db.execute("UPDATE board SET done_message_id = NULL")
+            await self._db.execute(
+                "UPDATE boards SET done_message_id = NULL WHERE guild_id = ?",
+                (self.guild_id,),
+            )
             await self._db.commit()
         return row["done_message_id"] if row else None
 
@@ -381,7 +488,9 @@ class TodoStore:
     # so they don't notify listeners.
 
     async def day_messages(self) -> dict[date, DayMessage]:
-        async with self._db.execute("SELECT * FROM day_messages") as cursor:
+        async with self._db.execute(
+            "SELECT * FROM guild_day_messages WHERE guild_id = ?", (self.guild_id,)
+        ) as cursor:
             rows = await cursor.fetchall()
         messages = [
             DayMessage(date.fromisoformat(r["day"]), r["message_id"], r["content"])
@@ -392,16 +501,22 @@ class TodoStore:
     async def save_day_message(self, message: DayMessage) -> None:
         async with self._write_lock:
             await self._db.execute(
-                "INSERT OR REPLACE INTO day_messages (day, message_id, content)"
-                " VALUES (?, ?, ?)",
-                (message.day.isoformat(), message.message_id, message.content),
+                "INSERT OR REPLACE INTO guild_day_messages"
+                " (guild_id, day, message_id, content) VALUES (?, ?, ?, ?)",
+                (
+                    self.guild_id,
+                    message.day.isoformat(),
+                    message.message_id,
+                    message.content,
+                ),
             )
             await self._db.commit()
 
     async def delete_day_message(self, day: date) -> None:
         async with self._write_lock:
             await self._db.execute(
-                "DELETE FROM day_messages WHERE day = ?", (day.isoformat(),)
+                "DELETE FROM guild_day_messages WHERE guild_id = ? AND day = ?",
+                (self.guild_id, day.isoformat()),
             )
             await self._db.commit()
 
@@ -409,7 +524,8 @@ class TodoStore:
         """Forget a per-day message that was deleted; False if it isn't one."""
         async with self._write_lock:
             cursor = await self._db.execute(
-                "DELETE FROM day_messages WHERE message_id = ?", (message_id,)
+                "DELETE FROM guild_day_messages WHERE guild_id = ? AND message_id = ?",
+                (self.guild_id, message_id),
             )
             await self._db.commit()
         return cursor.rowcount > 0
@@ -417,9 +533,14 @@ class TodoStore:
     async def clear_day_messages(self) -> list[int]:
         """Forget every per-day message, returning their ids."""
         async with self._write_lock:
-            async with self._db.execute("SELECT message_id FROM day_messages") as c:
+            async with self._db.execute(
+                "SELECT message_id FROM guild_day_messages WHERE guild_id = ?",
+                (self.guild_id,),
+            ) as c:
                 ids = [row["message_id"] for row in await c.fetchall()]
-            await self._db.execute("DELETE FROM day_messages")
+            await self._db.execute(
+                "DELETE FROM guild_day_messages WHERE guild_id = ?", (self.guild_id,)
+            )
             await self._db.commit()
         return ids
 

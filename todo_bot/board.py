@@ -4,7 +4,7 @@ from datetime import date
 
 import discord
 
-from todo_bot.store import BoardLayout, BoardLocation, DayMessage, Todo, TodoStore
+from todo_bot.store import BoardLayout, BoardLocation, DayMessage, GuildStore, Todo
 
 log = logging.getLogger(__name__)
 
@@ -93,7 +93,7 @@ def _content(embed: discord.Embed) -> str:
 
 
 class Board:
-    """The board channel: one Completed message per day (UTC) that has completed
+    """One server's board channel: one Completed message per day (UTC) that has completed
     todos, oldest first, then the open todos below them. Messages are edited in
     place; a new day's message is posted at the bottom and TODO is reposted under it.
 
@@ -101,7 +101,7 @@ class Board:
     syncs never overlap and a burst of changes becomes a single sync.
     """
 
-    def __init__(self, client: discord.Client, store: TodoStore) -> None:
+    def __init__(self, client: discord.Client, store: GuildStore) -> None:
         self.client = client
         self.store = store
         self._dirty = asyncio.Event()
@@ -126,7 +126,7 @@ class Board:
             try:
                 await self._refresh()
             except Exception:
-                log.exception("Failed to refresh the board")
+                log.exception("Failed to refresh the board of %s", self.store.guild_id)
 
     async def move_to(self, channel_id: int) -> None:
         """Repost the board in `channel_id` and delete the old messages, if any."""

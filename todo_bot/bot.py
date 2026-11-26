@@ -1,18 +1,19 @@
 import asyncio
 import logging
+from collections.abc import Sequence
 from typing import Literal, cast
 
 import discord
 from discord import app_commands
 
 from todo_bot.board import Board, format_todo, format_todos
-from todo_bot.store import BoardLayout, Status, TodoStore
+from todo_bot.store import BoardLayout, GuildStore, Status, TodoStore
 
 log = logging.getLogger(__name__)
 
 
 async def _todo_choices(
-    store: TodoStore, current: str, status: Status
+    store: GuildStore, current: str, status: Status
 ) -> list[app_commands.Choice[int]]:
     todos = await store.search(current, status=status)
     return [
@@ -22,7 +23,7 @@ async def _todo_choices(
 
 
 async def _project_choices(
-    store: TodoStore, current: str
+    store: GuildStore, current: str
 ) -> list[app_commands.Choice[str]]:
     """Projects in use that match, plus what's typed so a new one can be made."""
     typed = current.strip().lower()
@@ -39,10 +40,17 @@ async def _not_found(interaction: discord.Interaction, todo_id: int) -> None:
 
 
 class TodoCommands(app_commands.Group):
-    def __init__(self, store: TodoStore, board: Board) -> None:
+    """The /todo commands of one server, holding only that server's todos."""
+
+    def __init__(self, store: GuildStore, board: Board) -> None:
         super().__init__(name="todo", description="Manage the server todo list")
         self.store = store
         self._board = board
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Discord only sends a server the commands registered there, but never
+        # let a mix-up reach another server's todos.
+        return interaction.guild_id == self.store.guild_id
 
     @app_commands.command(description="Post the todo board in this channel")
     async def board(self, interaction: discord.Interaction) -> None:
@@ -238,29 +246,39 @@ class TodoCommands(app_commands.Group):
 
 
 class TodoBot(discord.Client):
-    def __init__(self, store: TodoStore, guild_id: int) -> None:
+    """Serves each of `guild_ids` its own todos, commands and board."""
+
+    def __init__(self, store: TodoStore, guild_ids: Sequence[int]) -> None:
         # Titles can contain mentions; never let the board ping anyone.
         super().__init__(
             intents=discord.Intents.default(),
             allowed_mentions=discord.AllowedMentions.none(),
         )
         self.store = store
-        self.guild_id = guild_id
         self.tree = app_commands.CommandTree(self)
-        self.board = Board(self, store)
+        self.boards = {g: Board(self, store.guild(g)) for g in guild_ids}
         # Changes from the API go through the same store, so they update the board too.
-        store.add_listener(self.board.request_refresh)
-        self._board_task: asyncio.Task[None] | None = None
+        store.add_listener(self._todos_changed)
+        self._board_tasks: list[asyncio.Task[None]] = []
+
+    def _todos_changed(self, guild_id: int) -> None:
+        if board := self.boards.get(guild_id):
+            board.request_refresh()
 
     async def setup_hook(self) -> None:
-        guild = discord.Object(id=self.guild_id)
-        self.tree.add_command(TodoCommands(self.store, self.board), guild=guild)
-        await self.tree.sync(guild=guild)
-        self._board_task = asyncio.create_task(self.board.run())
+        for guild_id, board in self.boards.items():
+            guild = discord.Object(id=guild_id)
+            self.tree.add_command(TodoCommands(board.store, board), guild=guild)
+            try:
+                await self.tree.sync(guild=guild)
+            except discord.Forbidden:
+                # Not invited yet: commands appear once it is and the bot restarts.
+                log.warning("Not in server %s; skipping its commands", guild_id)
+            self._board_tasks.append(asyncio.create_task(board.run()))
 
     async def close(self) -> None:
-        if self._board_task:
-            self._board_task.cancel()
+        for task in self._board_tasks:
+            task.cancel()
         await super().close()
 
     async def on_ready(self) -> None:
@@ -269,7 +287,9 @@ class TodoBot(discord.Client):
     async def on_raw_message_delete(
         self, payload: discord.RawMessageDeleteEvent
     ) -> None:
-        await self.board.message_deleted(payload.message_id)
+        if payload.guild_id and (board := self.boards.get(payload.guild_id)):
+            await board.message_deleted(payload.message_id)
 
-    def ready(self) -> bool:
-        return self.is_ready() and self.get_guild(self.guild_id) is not None
+    def guild_name(self, guild_id: int) -> str | None:
+        guild = self.get_guild(guild_id)
+        return guild.name if guild else None
